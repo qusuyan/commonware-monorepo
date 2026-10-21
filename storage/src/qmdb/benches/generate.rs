@@ -37,6 +37,8 @@ async fn bench_db<F: Family, C: DbAny<F, Key = Digest>>(
     commit_frequency: u32,
     make_value: impl Fn(&mut TestRng) -> C::Value,
 ) -> Duration {
+    // This intentionally measures a whole lifecycle rather than a single API: mutation,
+    // periodic commits, pruning, and the final sync all contribute to the reported time.
     let start = Instant::now();
     let db = gen_random_kv::<F, _>(
         db,
@@ -58,7 +60,9 @@ async fn bench_db<F: Family, C: DbAny<F, Key = Digest>>(
     elapsed
 }
 
-// -- Fixed-value variants (16 = 8 db shapes x 2 merkle families) --
+// -- Digest-value variants (16 = 8 db shapes x 2 Merkle families). --
+// Although this macro is historically named "fixed", it covers both fixed journals and
+// variable journals whose values are still fixed-size digests.
 
 define_fixed_variants! {
     enum FixedVariant;
@@ -80,6 +84,9 @@ fn bench_fixed_value_generate(c: &mut Criterion) {
                 |b| {
                     b.to_async(&runner).iter_custom(|iters| async move {
                         let ctx = context::get::<Context>();
+                        // Keep roughly 100 commits regardless of operation count. This makes
+                        // the measurement a steady write/churn workload instead of one giant
+                        // uncommitted batch.
                         let commit_freq = (operations / COMMITS_PER_ITERATION) as u32;
                         let mut total = Duration::ZERO;
                         for _ in 0..iters {
@@ -209,6 +216,8 @@ fn bench_keyless_generate(c: &mut Criterion) {
                             dispatch_keyless!(ctx.child("storage"), variant, |db| {
                                 let mut rng = TestRng::new(42);
                                 let mut batch = db.new_batch();
+                                // Keyless QMDB is append-only, so this loop measures log growth
+                                // and periodic durability without key-index or bitmap updates.
                                 for _ in 0u64..operations {
                                     let v = make_var_value(&mut rng);
                                     batch = batch.append(v);

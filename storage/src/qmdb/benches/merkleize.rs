@@ -281,7 +281,8 @@ type CurOVar256Mmb = commonware_storage::qmdb::current::ordered::variable::Db<
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000_000);
 const THREADS: NonZeroUsize = NZUsize!(8);
 pub(crate) const PAGE_SIZE: NonZeroU16 = NZU16!(4096);
-// Large enough such that most reads hit the cache.
+// Large enough such that most reads hit the cache. This is the normal in-memory
+// baseline; `SMALL_PAGE_CACHE_SIZE` is used only to make avoidable reads visible.
 pub(crate) const LARGE_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(16_384);
 // Very small so most reads miss the cache.
 const SMALL_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(32);
@@ -489,12 +490,19 @@ where
         let Some(db) = self.db.take() else {
             panic!("database must be present during setup");
         };
+        // Create one durable logical state before sampling. Its construction is deliberately
+        // excluded: otherwise an initial bulk insert would dominate a measurement meant to
+        // describe one later speculative batch.
         let mut db = seed_db(db, self.options.num_keys).await;
         if self.options.seed_sync {
+            // A synced seed makes subsequent reads representative of reopening from a durable
+            // state. Without it, the normal write buffers remain available to the benchmark.
             db = db.sync().await.unwrap();
         }
         self.db = Some(db);
         if self.options.clear_cache {
+            // Do not clear the OS cache here. This only clears Commonware's page cache, which
+            // exposes QMDB's own avoidable blob reads while preserving a repeatable process.
             self.page_cache.clear();
         }
         self.start_metrics = BlobMetrics::from_context(&self.context);
@@ -507,7 +515,11 @@ where
         let Some(db) = self.db.as_ref() else {
             panic!("database must be present before iteration");
         };
+        // Keep batch size proportional to state size. This is a 10% update workload, rather
+        // than a fixed-size microbenchmark whose behavior would change with the keyspace.
         let num_updates = self.options.num_keys / 10;
+        // Build the parent before the timer starts. The timed child therefore measures
+        // the extra lookup and Merkle work caused by one pending speculative ancestor.
         let batch = write_random_updates(
             db.new_batch(),
             num_updates,
@@ -521,6 +533,8 @@ where
         let Some(db) = self.db.as_ref() else {
             panic!("database must be present during iteration");
         };
+        // Sampling is with replacement in `write_random_updates`: a batch can overwrite the
+        // same key more than once, exercising the normal last-write-wins update path.
         let num_updates = self.options.num_keys / 10;
         let batch = if self.options.chained {
             let Some(parent) = self.parent.as_ref() else {
@@ -540,6 +554,9 @@ where
                 &mut self.rng,
             )
         };
+        // `write_random_updates`, `merkleize`, and `root` are deliberately all inside
+        // the timed interval: this is an end-to-end speculative-batch cost, not a
+        // hash-function microbenchmark.
         let merkleized = batch.merkleize(db, None).await.unwrap();
         merkleized.root()
     }
@@ -552,6 +569,8 @@ where
     }
 
     fn metrics(&self) -> Vec<Metric> {
+        // Wall-clock time is reported by Criterion. Record blob reads alongside it so an
+        // apparent latency change can be attributed to cache/index I/O rather than hashing.
         BlobMetrics::from_context(&self.context)
             .delta(self.start_metrics)
             .to_vec()
@@ -745,7 +764,14 @@ variants! {
 }
 
 cfg_if::cfg_if! {
-    if #[cfg(not(full_bench))] {
+    if #[cfg(huge_bench)] {
+        // This tier is intentionally opt-in: a complete variant matrix at 10M active keys is a
+        // large-state experiment, not a CI benchmark. Use a Criterion name filter to select the
+        // specific `any`/`current` comparison being studied.
+        const NUM_KEYS: &[u64] = &[10_000_000];
+        const SYNC_NUM_KEYS: &[u64] = NUM_KEYS;
+        const CHURNED_NUM_KEYS: &[u64] = NUM_KEYS;
+    } else if #[cfg(not(full_bench))] {
         const NUM_KEYS: &[u64] = &[10_000];
         const SYNC_NUM_KEYS: &[u64] = NUM_KEYS;
         const CHURNED_NUM_KEYS: &[u64] = NUM_KEYS;
@@ -762,6 +788,8 @@ const fn main_num_keys(seed_sync: bool) -> &'static [u64] {
 
 fn bench_merkleize(c: &mut Criterion) {
     let runner = tokio::Runner::new(Config::default());
+    // This is a Cartesian sweep. Each name encodes the database representation and
+    // starting state so Criterion results remain comparable after they are archived.
     for chained in [false, true] {
         for seed_sync in [false, true] {
             let clear_cache_options: &[bool] = if !chained && seed_sync {
@@ -826,7 +854,9 @@ fn bench_merkleize_churned(c: &mut Criterion) {
     let runner = tokio::Runner::new(Config::default());
     let cache_pages = SMALL_PAGE_CACHE_SIZE.get();
     for &num_keys in CHURNED_NUM_KEYS {
-        // `current::*` already used a bitmap; only `any::*` exercises the new scan path.
+        // `current::*` already uses a bitmap to find active history. This special case is
+        // therefore limited to `any::*`, where repeatedly overwritten keys force the
+        // inactivity-floor scan to skip old operation-log entries.
         for variant in VARIANTS.iter().copied().filter(Variant::is_any) {
             c.bench_function(
                 &format!(

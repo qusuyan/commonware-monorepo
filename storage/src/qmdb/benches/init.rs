@@ -88,7 +88,9 @@ fn bench_fixed_value_init(c: &mut Criterion) {
                         variant.name(),
                     ),
                     |b| {
-                        // Setup: populate database (once, on first matched sample).
+                        // Setup: populate the on-disk database once, on the first matched
+                        // sample. Each cache-size configuration subsequently reopens exactly
+                        // this same database, so their results differ only in init-cache use.
                         if !initialized {
                             commonware_runtime::tokio::Runner::new(cfg.clone()).start(
                                 |ctx| async move {
@@ -106,7 +108,8 @@ fn bench_fixed_value_init(c: &mut Criterion) {
                             initialized = true;
                         }
 
-                        // Benchmark: measure init time at this cache size.
+                        // Benchmark: measure reopen/replay time at this cache size. The
+                        // populated on-disk database is reused so generation is not charged.
                         b.to_async(&runner).iter_custom(move |iters| async move {
                             let ctx = context::get::<Context>();
                             dispatch_fixed_timed_init!(ctx, variant, iters, cache_size, |db| {
@@ -155,7 +158,9 @@ fn bench_var_value_init(c: &mut Criterion) {
                         variant.name(),
                     ),
                     |b| {
-                        // Setup: populate database (once, on first matched sample).
+                        // Setup: populate the on-disk database once, on the first matched
+                        // sample. Each cache-size configuration subsequently reopens exactly
+                        // this same database, so their results differ only in init-cache use.
                         if !initialized {
                             commonware_runtime::tokio::Runner::new(cfg.clone()).start(
                                 |ctx| async move {
@@ -168,7 +173,8 @@ fn bench_var_value_init(c: &mut Criterion) {
                             initialized = true;
                         }
 
-                        // Benchmark: measure init time at this cache size.
+                        // Benchmark: measure reopen/replay time at this cache size. The
+                        // populated on-disk database is reused so generation is not charged.
                         b.to_async(&runner).iter_custom(move |iters| async move {
                             let ctx = context::get::<Context>();
                             dispatch_var_timed_init!(ctx, variant, iters, cache_size, |db| {

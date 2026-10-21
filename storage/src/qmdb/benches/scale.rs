@@ -295,6 +295,9 @@ fn generate(
             make_fixed_value,
         )
         .await;
+        // Prune only after the generated updates have become eligible. This keeps a multi-GB
+        // experiment from growing an unbounded historical log that would obscure read/startup
+        // behavior of the active state.
         let boundary = db.sync_boundary();
         let db = db.prune(boundary).await.unwrap();
         let _db = db.sync().await.unwrap();
@@ -445,6 +448,8 @@ async fn run_reads<D: DbAny<Mmr, Key = Digest> + Send + Sync + 'static>(
             eprintln!("  skipping readers={concurrency}: more readers than gets");
             continue;
         }
+        // Attempt a cold pass first, then immediately repeat the exact key streams while warm.
+        // A failed cache drop is reported so it cannot silently be interpreted as cold I/O.
         if !drop_os_caches() {
             eprintln!(
                 "  warning: OS cache drop failed (needs passwordless sudo); cold pass is not cold"

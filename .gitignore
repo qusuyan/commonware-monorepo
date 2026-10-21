@@ -2,6 +2,9 @@
 *.DS_Store
 target
 benchmark-tracking-results
+measurements-rain/results/*
+!measurements-rain/results/.gitkeep
+!measurements-rain/results/README.md
 *.vscode
 .idea
 examples/flood/assets

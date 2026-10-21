@@ -67,6 +67,8 @@ async fn bench_direct_apply(ctx: &Context, updates: u64) -> Duration {
     let batch = write_updates::<Db>(db.new_batch(), updates, &mut rng);
     let batch = batch.merkleize(&db, None).await.unwrap();
 
+    // Authentication is already complete. Time only installation of the authenticated
+    // batch into the database's speculative/durable state.
     let start = Instant::now();
     let (db, _) = db.apply_batch(batch).await.unwrap();
     let elapsed = start.elapsed();
@@ -107,6 +109,8 @@ async fn bench_apply_with_uncommitted_ancestor(ctx: &Context, updates: u64) -> D
     let db = seed_db(db, NUM_KEYS).await;
 
     let mut rng = TestRng::new(7);
+    // Keep the parent uncommitted. Applying its child asks QMDB to reconcile the child with
+    // speculative history that has not yet reached the durable database state.
     let parent = write_updates::<Db>(db.new_batch(), updates, &mut rng);
     let parent = parent.merkleize(&db, None).await.unwrap();
 
@@ -133,6 +137,8 @@ async fn bench_apply_with_committed_ancestor(ctx: &Context, updates: u64) -> Dur
     let child = write_updates::<Db>(parent.new_batch(), updates, &mut rng);
     let child = child.merkleize(&db, None).await.unwrap();
 
+    // Make the parent visible to the database before timing the child, isolating the path
+    // where a child follows history that was already applied.
     let (db, _) = db.apply_batch(parent).await.unwrap();
 
     let start = Instant::now();
@@ -185,6 +191,8 @@ async fn bench_apply_multi_uncommitted(ctx: &Context, updates: u64) -> Duration 
     let c = write_updates::<Db>(b.new_batch(), updates, &mut rng);
     let c = c.merkleize(&db, None).await.unwrap();
 
+    // Remove the ancestor handles while preserving their relationship encoded in `c`. This is
+    // the direct-apply case for a batch with multiple missing speculative predecessors.
     drop(a);
     drop(b);
 
@@ -299,7 +307,8 @@ fn bench_apply_batch(c: &mut Criterion) {
             };
         }
 
-        // One criterion benchmark per (case, variant) pair.
+        // One Criterion benchmark per (case, variant) pair. The ancestor cases distinguish
+        // application work from the cost of reconnecting a batch to pending history.
         apply_case!(
             "case=direct variant=any::unordered::fixed::mmb",
             bench_direct_apply

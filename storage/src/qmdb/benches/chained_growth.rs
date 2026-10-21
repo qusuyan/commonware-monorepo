@@ -169,7 +169,9 @@ async fn run_chained_growth<
     let mut db = db.sync().await.unwrap();
     let mut rng = TestRng::new(99);
 
-    // Pre-build a deep chain (untimed).
+    // Pre-build a deep chain (untimed). Each batch changes just one random key, so its bitmap
+    // overlay covers very few chunks. A later lookup may need to walk many parent overlays
+    // before it finds the chunk that contains its key.
     let initial = write_random_updates(db.new_batch(), UPDATES_PER_BATCH, NUM_KEYS, &mut rng);
     let mut parent = initial.merkleize(&db, None).await.unwrap();
     for _ in 0..PREBUILT_CHAIN {
@@ -180,11 +182,14 @@ async fn run_chained_growth<
         parent = child;
     }
 
-    // Flush buffered data so the timed region doesn't inherit setup fsync cost.
+    // Flush buffered data so the timed region doesn't inherit setup fsync cost. The remaining
+    // time is about growing an already-established speculative chain, not initial durability.
     db = db.commit().await.unwrap();
     db = db.sync().await.unwrap();
 
-    // Timed: grow more batches on top of the pre-built chain.
+    // Timed: grow more batches on top of the pre-built chain. Applying the previous
+    // parent is included because real speculative execution advances this way; initial
+    // construction of the 10,000-deep chain is intentionally excluded.
     let start = Instant::now();
     for _ in 0..grow {
         let child_batch =

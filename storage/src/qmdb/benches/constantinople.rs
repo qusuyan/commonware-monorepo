@@ -190,7 +190,8 @@ macro_rules! run_pipeline {
         let args = $args;
         let db = $db;
 
-        // Seed all keys in one committed batch.
+        // Seed all keys in one committed batch. This establishes the state that a block would
+        // normally read; it is setup, not part of a timed validator-style block.
         let seed_start = Instant::now();
         let mut rng = TestRng::new(42);
         let mut batch = db.new_batch();
@@ -201,7 +202,8 @@ macro_rules! run_pipeline {
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         let mut db = db.commit().await.unwrap();
 
-        // Churn: overwrite batches so inactive ops accumulate above the floor.
+        // Churn: overwrite batches so inactive operations accumulate above the floor. This
+        // prevents the timed pass from measuring an unrealistically pristine operation log.
         for _ in 0..CHURN_BATCHES {
             let mut batch = db.new_batch();
             for (k, v) in gen_muts(&mut rng, args.num_updates, args.num_keys) {
@@ -231,6 +233,8 @@ macro_rules! run_pipeline {
                 chain.push(b.merkleize(&db, None).await.unwrap());
             }
 
+            // Use one generated read set for both staging and selecting updates. Thus every
+            // update targets a key that was loaded in this simulated block.
             let reads = gen_muts(&mut rng, args.num_reads, args.num_keys);
             let keys: Vec<&Digest> = reads.iter().map(|(k, _)| k).collect();
             let mut slots: Vec<_> = (0..reads.len()).collect();
@@ -238,6 +242,8 @@ macro_rules! run_pipeline {
                 let j = i + (rng.next_u64() as usize % (slots.len() - i));
                 slots.swap(i, j);
             }
+            // Randomly select which staged entries are rewritten; the remaining staged values
+            // model reads that do not result in a state transition.
             let updates: Vec<_> = slots[..args.num_updates as usize]
                 .iter()
                 .map(|&idx| (idx, Some(reads[idx].1)))
@@ -250,7 +256,8 @@ macro_rules! run_pipeline {
 
             // Timed: load all touched keys, merkleize selected updates, read root. The
             // load returns a staged batch that consumes `(read_index, value)` pairs after the
-            // caller has computed them.
+            // caller has computed them. `t_load` separates state-access cost from the
+            // authentication cost reported as `merkleize` below.
             let start = Instant::now();
             let b = new_batch();
             let read_chunks = args.read_chunks.min(keys.len()).max(1);

@@ -1,7 +1,8 @@
 //! Gungraun benchmark for speculative batch merkleization.
 //!
 //! Reuses the criterion [`merkleize`] module's workloads and variant dispatch,
-//! selecting a subset of variants for callgrind tracking.
+//! selecting a subset of variants for Callgrind tracking. This produces deterministic
+//! instruction and simulated-cache counters rather than a wall-clock latency estimate.
 
 use crate::{
     common::Digest,
@@ -35,6 +36,8 @@ const CURRENT_ORDERED_FIXED_MMB_CHUNK_256: BenchOptions = BenchOptions {
 };
 
 async fn run(context: Context, options: BenchOptions) -> Digest {
+    // Keep this dispatch intentionally narrow. The tracking configuration names only these two
+    // stable cases, allowing CI to compare one reproducible instruction-count baseline at a time.
     match options.variant {
         Variant::AnyFixed => {
             let metrics_context = context.child("metrics");
