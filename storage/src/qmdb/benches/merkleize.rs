@@ -420,16 +420,25 @@ async fn run_churned_bench<F: merkle::Family, C: DbAny<F, Key = Digest, Value = 
 pub(crate) struct BenchOptions {
     pub(crate) variant: Variant,
     pub(crate) num_keys: u64,
+    pub(crate) fixed_updates: Option<u64>,
     pub(crate) chained: bool,
     pub(crate) seed_sync: bool,
     pub(crate) clear_cache: bool,
 }
 
 impl BenchOptions {
+    fn num_updates(self) -> u64 {
+        self.fixed_updates.unwrap_or(self.num_keys / 10)
+    }
+
     pub(crate) fn benchmark(self) -> Benchmark {
-        Benchmark::new("qmdb::merkleize")
+        let mut benchmark = Benchmark::new("qmdb::merkleize")
             .with_param("v", self.variant.name())
-            .with_param("k", self.num_keys)
+            .with_param("k", self.num_keys);
+        if let Some(updates) = self.fixed_updates {
+            benchmark = benchmark.with_param("u", updates);
+        }
+        benchmark
             .with_param("ch", self.chained)
             .with_param("s", self.seed_sync)
             .with_param("cc", self.clear_cache)
@@ -515,9 +524,8 @@ where
         let Some(db) = self.db.as_ref() else {
             panic!("database must be present before iteration");
         };
-        // Keep batch size proportional to state size. This is a 10% update workload, rather
-        // than a fixed-size microbenchmark whose behavior would change with the keyspace.
-        let num_updates = self.options.num_keys / 10;
+        // Match the timed child's write count, whether it is fixed or 10% of the keyspace.
+        let num_updates = self.options.num_updates();
         // Build the parent before the timer starts. The timed child therefore measures
         // the extra lookup and Merkle work caused by one pending speculative ancestor.
         let batch = write_random_updates(
@@ -535,7 +543,7 @@ where
         };
         // Sampling is with replacement in `write_random_updates`: a batch can overwrite the
         // same key more than once, exercising the normal last-write-wins update path.
-        let num_updates = self.options.num_keys / 10;
+        let num_updates = self.options.num_updates();
         let batch = if self.options.chained {
             let Some(parent) = self.parent.as_ref() else {
                 panic!("parent must be prepared before chained iteration");
@@ -788,6 +796,13 @@ const fn main_num_keys(seed_sync: bool) -> &'static [u64] {
 
 fn bench_merkleize(c: &mut Criterion) {
     let runner = tokio::Runner::new(Config::default());
+    let fixed_updates = std::env::var("QMDB_MERKLEIZE_UPDATES").ok().map(|value| {
+        let updates = value
+            .parse::<u64>()
+            .expect("QMDB_MERKLEIZE_UPDATES must be a positive u64");
+        assert!(updates > 0, "QMDB_MERKLEIZE_UPDATES must be positive");
+        updates
+    });
     // This is a Cartesian sweep. Each name encodes the database representation and
     // starting state so Criterion results remain comparable after they are archived.
     for chained in [false, true] {
@@ -803,6 +818,7 @@ fn bench_merkleize(c: &mut Criterion) {
                         let options = BenchOptions {
                             variant,
                             num_keys,
+                            fixed_updates,
                             chained,
                             seed_sync,
                             clear_cache,

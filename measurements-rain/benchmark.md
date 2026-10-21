@@ -23,6 +23,8 @@ Names encode configuration. `variant` identifies the QMDB representation;
 `keys`/`elements` is pre-existing state; `updates`/`operations` is mutation
 count; `ch` signals a pending parent; `s` signals a synced seed; and `cc`
 signals a deliberately cleared Commonware page cache.
+For a fixed-count merkleize run, `u=N` records N write calls per batch. Legacy
+names omit `u` and use 10% of the seeded key count.
 
 `any` and `current` are representations, not generic modes. `any`
 authenticates the operation log and keeps its activity bitmap local. `current`
@@ -50,6 +52,12 @@ create a pending parent. Setup is excluded from timing. One timed iteration:
 
 It does **not** apply, commit, or sync that batch. The workload also records
 `blob_reads` during timing.
+Use `--updates N` in the measurement launcher to replace the 10% count with a
+positive fixed number of write calls. Keys are sampled uniformly with
+replacement, so N calls can update fewer than N distinct keys. In a chained
+case, the parent and timed child each receive N calls; parent preparation stays
+outside timing. This option applies to the main Criterion merkleize cases, not
+the churned subfamily or Callgrind tracking.
 
 The normal sweep spans `any`/`current`, index type, value type, MMR/MMB,
 current chunk size, direct/chained batches, synced/unsynced seeds, and relevant
@@ -64,6 +72,8 @@ cache. Timing remains updates, merkleization, and root retrieval.
 cargo bench -p commonware-storage --features test-traits --bench qmdb -- qmdb::merkleize
 RUSTFLAGS='--cfg full_bench' cargo bench -p commonware-storage --features test-traits --bench qmdb -- qmdb::merkleize
 RUSTFLAGS='--cfg huge_bench' cargo bench -p commonware-storage --features test-traits --bench qmdb -- 'current::unordered::fixed::mmr chunk=32'
+measurements-rain/scripts/run-part1-baseline.sh fixed-write-study merkleize full --updates 1000
+measurements-rain/scripts/run-criterion.sh fixed-any-10k qmdb --updates 1000 'qmdb::merkleize/v=any::unordered::fixed::mmr k=10000 u=1000 ch=false'
 ```
 
 ### `apply_batch.rs`: installing authenticated batches
@@ -212,6 +222,10 @@ artifacts under `measurements-rain/results/<run-id>/`:
 - `summary.csv` and `summary.json`: normalized observations when parsed;
 - `callgrind/`: archived CPU-counter output; and
 - `notes.md`: cache state, thermal events, or other operator notes.
+
+Fixed-count runs record `fixed_updates_per_batch` in `manifest.json` and
+`write_calls_per_batch` in each normalized summary row. The Part 1 launcher
+appends `-uN` to the run ID when a fixed count is selected.
 
 The Part 1 helper selects the `merkleize` suite. Its tiers use no extra flag,
 `--cfg full_bench`, and `--cfg huge_bench`. It intentionally does not launch
