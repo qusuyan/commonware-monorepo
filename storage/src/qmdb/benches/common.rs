@@ -751,6 +751,51 @@ where
     batch
 }
 
+/// Select which key range a speculative write targets. Seeded keys occupy `0..num_keys`;
+/// insert keys occupy the disjoint range `num_keys..2*num_keys`.
+#[derive(Clone, Copy, Debug)]
+pub enum WriteType {
+    Overwrite,
+    Insert,
+    Mixed,
+}
+
+impl WriteType {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Overwrite => "overwrite",
+            Self::Insert => "insert",
+            Self::Mixed => "mixed",
+        }
+    }
+}
+
+/// Write randomly sampled keys, with replacement, from the selected key range.
+pub fn write_random_writes<B, Db>(
+    mut batch: B,
+    num_writes: u64,
+    num_keys: u64,
+    rng: &mut TestRng,
+    write_type: WriteType,
+) -> B
+where
+    B: UnmerkleizedBatch<Db, K = Digest, V = Digest>,
+    Db: ?Sized,
+{
+    for _ in 0..num_writes {
+        let sampled = rng.next_u64() % num_keys;
+        let insert = match write_type {
+            WriteType::Overwrite => false,
+            WriteType::Insert => true,
+            WriteType::Mixed => rng.next_u32() % 2 == 0,
+        };
+        let idx = if insert { sampled + num_keys } else { sampled };
+        let key = Sha256::hash(&[&idx.to_be_bytes()]);
+        batch = batch.write(key, Some(make_fixed_value(rng)));
+    }
+    batch
+}
+
 /// Generate a variable-size `Vec<u8>` value (1-256 bytes).
 pub fn make_var_value(rng: &mut TestRng) -> Vec<u8> {
     let len = (rng.next_u32() as usize) % VARIABLE_VALUE_MAX_LEN + 1;
