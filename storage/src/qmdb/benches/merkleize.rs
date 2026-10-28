@@ -10,8 +10,8 @@
 //!   optimizes for.
 
 use crate::common::{
-    CHUNK_SIZE, Digest, WRITE_BUFFER_SIZE, WriteType, seed_db, write_random_updates,
-    write_random_writes,
+    CHUNK_SIZE, Digest, WRITE_BUFFER_SIZE, WriteSampler, WriteType, parse_write_skew, seed_db,
+    write_random_updates, write_random_writes, write_sampled_writes,
 };
 use commonware_bench::{Benchmark, Metric, Workload};
 use commonware_cryptography::Sha256;
@@ -425,6 +425,7 @@ pub(crate) struct BenchOptions {
     pub(crate) num_keys: u64,
     pub(crate) fixed_updates: Option<u64>,
     pub(crate) write_type: Option<WriteType>,
+    pub(crate) skew: Option<f64>,
     pub(crate) chained: bool,
     pub(crate) seed_sync: bool,
     pub(crate) clear_cache: bool,
@@ -445,6 +446,9 @@ impl BenchOptions {
         if let Some(write_type) = self.write_type {
             benchmark = benchmark.with_param("w", write_type.name());
         }
+        if let Some(skew) = self.skew {
+            benchmark = benchmark.with_param("zipf", skew);
+        }
         benchmark
             .with_param("ch", self.chained)
             .with_param("s", self.seed_sync)
@@ -463,6 +467,7 @@ where
     options: BenchOptions,
     new_child: fn(&C::Merkleized) -> C::Batch,
     rng: TestRng,
+    sampler: WriteSampler,
     parent: Option<C::Merkleized>,
     start_metrics: BlobMetrics,
     _family: PhantomData<F>,
@@ -487,6 +492,8 @@ where
             options,
             new_child,
             rng: TestRng::new(99),
+            sampler: WriteSampler::new(options.num_keys, options.skew.unwrap_or(0.0))
+                .expect("valid keyspace and write skew"),
             parent: None,
             start_metrics: BlobMetrics::default(),
             _family: PhantomData,
@@ -536,12 +543,22 @@ where
         // Build the parent before the timer starts. The timed child therefore measures
         // the extra lookup and Merkle work caused by one pending speculative ancestor.
         // The parent only touches seeded keys, so timed inserts remain new even in a chain.
-        let batch = write_random_updates(
-            db.new_batch(),
-            num_updates,
-            self.options.num_keys,
-            &mut self.rng,
-        );
+        let batch = if self.options.skew.unwrap_or(0.0) > 0.0 {
+            write_sampled_writes(
+                db.new_batch(),
+                num_updates,
+                &mut self.rng,
+                WriteType::Overwrite,
+                &self.sampler,
+            )
+        } else {
+            write_random_updates(
+                db.new_batch(),
+                num_updates,
+                self.options.num_keys,
+                &mut self.rng,
+            )
+        };
         self.parent = Some(batch.merkleize(db, None).await.unwrap());
     }
 
@@ -555,36 +572,30 @@ where
             let Some(parent) = self.parent.as_ref() else {
                 panic!("parent must be prepared before chained iteration");
             };
-            match self.options.write_type {
-                Some(write_type) => write_random_writes(
-                    (self.new_child)(parent),
-                    num_updates,
-                    self.options.num_keys,
-                    &mut self.rng,
-                    write_type,
-                ),
-                None => write_random_updates(
-                    (self.new_child)(parent),
-                    num_updates,
-                    self.options.num_keys,
-                    &mut self.rng,
-                ),
-            }
+            (self.new_child)(parent)
+        } else {
+            db.new_batch()
+        };
+        let batch = if self.options.skew.unwrap_or(0.0) > 0.0 {
+            write_sampled_writes(
+                batch,
+                num_updates,
+                &mut self.rng,
+                self.options.write_type.unwrap_or(WriteType::Overwrite),
+                &self.sampler,
+            )
         } else {
             match self.options.write_type {
                 Some(write_type) => write_random_writes(
-                    db.new_batch(),
+                    batch,
                     num_updates,
                     self.options.num_keys,
                     &mut self.rng,
                     write_type,
                 ),
-                None => write_random_updates(
-                    db.new_batch(),
-                    num_updates,
-                    self.options.num_keys,
-                    &mut self.rng,
-                ),
+                None => {
+                    write_random_updates(batch, num_updates, self.options.num_keys, &mut self.rng)
+                }
             }
         };
         // Batch writes, `merkleize`, and `root` are deliberately all inside
@@ -821,6 +832,10 @@ const fn main_num_keys(seed_sync: bool) -> &'static [u64] {
 
 fn bench_merkleize(c: &mut Criterion) {
     let runner = tokio::Runner::new(Config::default());
+    let skew = std::env::var("QMDB_MERKLEIZE_SKEW").ok().map(|value| {
+        parse_write_skew(&value)
+            .expect("QMDB_MERKLEIZE_SKEW must be a finite, non-negative exponent")
+    });
     let fixed_updates = std::env::var("QMDB_MERKLEIZE_UPDATES").ok().map(|value| {
         let updates = value
             .parse::<u64>()
@@ -853,6 +868,7 @@ fn bench_merkleize(c: &mut Criterion) {
                             num_keys,
                             fixed_updates,
                             write_type,
+                            skew,
                             chained,
                             seed_sync,
                             clear_cache,
