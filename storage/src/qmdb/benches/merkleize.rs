@@ -1,7 +1,7 @@
 //! Benchmarks for speculative batch merkleization.
 //!
-//! Each iteration creates a speculative batch (10% random updates, sampled with replacement),
-//! merkleizes it, and reads the root. The per-iteration `write_random_updates` + `merkleize` +
+//! Each iteration creates a speculative batch (10% random writes by default, sampled with
+//! replacement), merkleizes it, and reads the root. The per-iteration writes + `merkleize` +
 //! `root()` is timed; one-time setup (seed, churn batches, sync) is not.
 //!
 //! - [`bench_merkleize`]: timing on a freshly seeded DB (no prior overwrites).
@@ -9,7 +9,10 @@
 //!   update operations above the inactivity floor — the workload the floor-raise bitmap-skip
 //!   optimizes for.
 
-use crate::common::{CHUNK_SIZE, Digest, WRITE_BUFFER_SIZE, seed_db, write_random_updates};
+use crate::common::{
+    CHUNK_SIZE, Digest, WRITE_BUFFER_SIZE, WriteType, seed_db, write_random_updates,
+    write_random_writes,
+};
 use commonware_bench::{Benchmark, Metric, Workload};
 use commonware_cryptography::Sha256;
 use commonware_macros::boxed;
@@ -421,6 +424,7 @@ pub(crate) struct BenchOptions {
     pub(crate) variant: Variant,
     pub(crate) num_keys: u64,
     pub(crate) fixed_updates: Option<u64>,
+    pub(crate) write_type: Option<WriteType>,
     pub(crate) chained: bool,
     pub(crate) seed_sync: bool,
     pub(crate) clear_cache: bool,
@@ -437,6 +441,9 @@ impl BenchOptions {
             .with_param("k", self.num_keys);
         if let Some(updates) = self.fixed_updates {
             benchmark = benchmark.with_param("u", updates);
+        }
+        if let Some(write_type) = self.write_type {
+            benchmark = benchmark.with_param("w", write_type.name());
         }
         benchmark
             .with_param("ch", self.chained)
@@ -528,6 +535,7 @@ where
         let num_updates = self.options.num_updates();
         // Build the parent before the timer starts. The timed child therefore measures
         // the extra lookup and Merkle work caused by one pending speculative ancestor.
+        // The parent only touches seeded keys, so timed inserts remain new even in a chain.
         let batch = write_random_updates(
             db.new_batch(),
             num_updates,
@@ -541,28 +549,45 @@ where
         let Some(db) = self.db.as_ref() else {
             panic!("database must be present during iteration");
         };
-        // Sampling is with replacement in `write_random_updates`: a batch can overwrite the
-        // same key more than once, exercising the normal last-write-wins update path.
+        // Sampling is with replacement: a batch can select the same key more than once.
         let num_updates = self.options.num_updates();
         let batch = if self.options.chained {
             let Some(parent) = self.parent.as_ref() else {
                 panic!("parent must be prepared before chained iteration");
             };
-            write_random_updates(
-                (self.new_child)(parent),
-                num_updates,
-                self.options.num_keys,
-                &mut self.rng,
-            )
+            match self.options.write_type {
+                Some(write_type) => write_random_writes(
+                    (self.new_child)(parent),
+                    num_updates,
+                    self.options.num_keys,
+                    &mut self.rng,
+                    write_type,
+                ),
+                None => write_random_updates(
+                    (self.new_child)(parent),
+                    num_updates,
+                    self.options.num_keys,
+                    &mut self.rng,
+                ),
+            }
         } else {
-            write_random_updates(
-                db.new_batch(),
-                num_updates,
-                self.options.num_keys,
-                &mut self.rng,
-            )
+            match self.options.write_type {
+                Some(write_type) => write_random_writes(
+                    db.new_batch(),
+                    num_updates,
+                    self.options.num_keys,
+                    &mut self.rng,
+                    write_type,
+                ),
+                None => write_random_updates(
+                    db.new_batch(),
+                    num_updates,
+                    self.options.num_keys,
+                    &mut self.rng,
+                ),
+            }
         };
-        // `write_random_updates`, `merkleize`, and `root` are deliberately all inside
+        // Batch writes, `merkleize`, and `root` are deliberately all inside
         // the timed interval: this is an end-to-end speculative-batch cost, not a
         // hash-function microbenchmark.
         let merkleized = batch.merkleize(db, None).await.unwrap();
@@ -803,6 +828,14 @@ fn bench_merkleize(c: &mut Criterion) {
         assert!(updates > 0, "QMDB_MERKLEIZE_UPDATES must be positive");
         updates
     });
+    let write_type = std::env::var("QMDB_MERKLEIZE_WRITE_TYPE")
+        .ok()
+        .map(|value| match value.as_str() {
+            "overwrite" => WriteType::Overwrite,
+            "insert" => WriteType::Insert,
+            "mixed" => WriteType::Mixed,
+            _ => panic!("QMDB_MERKLEIZE_WRITE_TYPE must be overwrite, insert, or mixed"),
+        });
     // This is a Cartesian sweep. Each name encodes the database representation and
     // starting state so Criterion results remain comparable after they are archived.
     for chained in [false, true] {
@@ -819,6 +852,7 @@ fn bench_merkleize(c: &mut Criterion) {
                             variant,
                             num_keys,
                             fixed_updates,
+                            write_type,
                             chained,
                             seed_sync,
                             clear_cache,
