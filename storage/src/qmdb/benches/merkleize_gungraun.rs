@@ -22,6 +22,7 @@ use gungraun::{library_benchmark, library_benchmark_group};
 const ANY_UNORDERED_FIXED_MMR: BenchOptions = BenchOptions {
     variant: Variant::AnyFixed,
     num_keys: 10_000,
+    fixed_updates: None,
     chained: false,
     seed_sync: true,
     clear_cache: true,
@@ -30,6 +31,7 @@ const ANY_UNORDERED_FIXED_MMR: BenchOptions = BenchOptions {
 const CURRENT_ORDERED_FIXED_MMB_CHUNK_256: BenchOptions = BenchOptions {
     variant: Variant::CurrentOrderedFixed256Mmb,
     num_keys: 10_000,
+    fixed_updates: None,
     chained: false,
     seed_sync: true,
     clear_cache: true,
