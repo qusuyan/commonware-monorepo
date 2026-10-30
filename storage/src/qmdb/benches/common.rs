@@ -770,6 +770,75 @@ impl WriteType {
     }
 }
 
+/// Parse a finite, non-negative Zipf exponent. Zero selects uniform sampling.
+pub fn parse_write_skew(value: &str) -> Result<f64, &'static str> {
+    let exponent = value.parse::<f64>().map_err(|_| "skew must be a number")?;
+    if !exponent.is_finite() || exponent < 0.0 {
+        return Err("skew must be finite and non-negative");
+    }
+    Ok(if exponent == 0.0 { 0.0 } else { exponent })
+}
+
+/// Reusable key-rank sampler. Construct before timing; draws remain part of the workload.
+pub struct WriteSampler {
+    num_keys: u64,
+    zipf: Option<Zipf<f64>>,
+}
+
+impl WriteSampler {
+    pub fn new(num_keys: u64, exponent: f64) -> Result<Self, &'static str> {
+        if num_keys == 0 {
+            return Err("keyspace must be non-zero");
+        }
+        if !exponent.is_finite() || exponent < 0.0 {
+            return Err("skew must be finite and non-negative");
+        }
+        let zipf = if exponent == 0.0 {
+            None
+        } else {
+            Some(Zipf::new(num_keys as f64, exponent).map_err(|_| "invalid Zipf parameters")?)
+        };
+        Ok(Self { num_keys, zipf })
+    }
+
+    pub fn sample(&self, rng: &mut TestRng) -> u64 {
+        match &self.zipf {
+            Some(zipf) => ((zipf.sample(rng) as u64).saturating_sub(1)).min(self.num_keys - 1),
+            None => rng.next_u64() % self.num_keys,
+        }
+    }
+}
+
+/// Stage sampled writes, allowing repeated keys and retaining the selected write-type mix.
+pub fn write_sampled_writes<B, Db>(
+    mut batch: B,
+    num_writes: u64,
+    rng: &mut TestRng,
+    write_type: WriteType,
+    sampler: &WriteSampler,
+) -> B
+where
+    B: UnmerkleizedBatch<Db, K = Digest, V = Digest>,
+    Db: ?Sized,
+{
+    for _ in 0..num_writes {
+        let sampled = sampler.sample(rng);
+        let insert = match write_type {
+            WriteType::Overwrite => false,
+            WriteType::Insert => true,
+            WriteType::Mixed => rng.next_u32().is_multiple_of(2),
+        };
+        let idx = if insert {
+            sampled + sampler.num_keys
+        } else {
+            sampled
+        };
+        let key = Sha256::hash(&[&idx.to_be_bytes()]);
+        batch = batch.write(key, Some(make_fixed_value(rng)));
+    }
+    batch
+}
+
 /// Write randomly sampled keys, with replacement, from the selected key range.
 pub fn write_random_writes<B, Db>(
     mut batch: B,
@@ -787,7 +856,7 @@ where
         let insert = match write_type {
             WriteType::Overwrite => false,
             WriteType::Insert => true,
-            WriteType::Mixed => rng.next_u32() % 2 == 0,
+            WriteType::Mixed => rng.next_u32().is_multiple_of(2),
         };
         let idx = if insert { sampled + num_keys } else { sampled };
         let key = Sha256::hash(&[&idx.to_be_bytes()]);
