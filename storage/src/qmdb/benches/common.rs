@@ -34,7 +34,10 @@ use commonware_storage::{
     translator::EightCap,
 };
 use commonware_utils::{NZU16, NZU64, NZUsize, TestRng};
-use rand::{Rng, distr::Distribution};
+use rand::{
+    Rng,
+    distr::{Distribution, StandardUniform},
+};
 use rand_distr::Zipf;
 use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 
@@ -779,10 +782,68 @@ pub fn parse_write_skew(value: &str) -> Result<f64, &'static str> {
     Ok(if exponent == 0.0 { 0.0 } else { exponent })
 }
 
-/// Reusable key-rank sampler. Construct before timing; draws remain part of the workload.
+/// Reusable key-rank sampler supporting uniform and skewed workloads.
 pub struct WriteSampler {
     num_keys: u64,
-    zipf: Option<Zipf<f64>>,
+    zipf: Option<StableZipf>,
+}
+
+/// Finite Zipf rejection sampler with stable evaluation around exponent one.
+struct StableZipf {
+    num_keys: u64,
+    exponent: f64,
+    delta: f64,
+    proposal_mass: f64,
+}
+
+impl StableZipf {
+    fn new(num_keys: u64, exponent: f64) -> Self {
+        let delta = 1.0 - exponent;
+        let log_keys = (num_keys as f64).ln();
+        // Integrate the envelope: 1 on [0, 1], then x^(-exponent) on (1, num_keys].
+        // exp_m1 avoids subtracting nearly equal numbers when delta is close to zero.
+        let proposal_mass = if delta == 0.0 {
+            1.0 + log_keys
+        } else {
+            1.0 + (delta * log_keys).exp_m1() / delta
+        };
+        Self {
+            num_keys,
+            exponent,
+            delta,
+            proposal_mass,
+        }
+    }
+
+    fn sample(&self, rng: &mut TestRng) -> u64 {
+        loop {
+            let uniform: f64 = StandardUniform.sample(rng);
+            let mass = uniform * self.proposal_mass;
+            let proposal = if mass <= 1.0 {
+                mass
+            } else if self.delta == 0.0 {
+                (mass - 1.0).exp()
+            } else {
+                // ln_1p preserves the small offset before division by delta.
+                ((self.delta * (mass - 1.0)).ln_1p() / self.delta).exp()
+            };
+            let rank = (proposal + 1.0).floor();
+            if !rank.is_finite() || rank < 1.0 || rank > self.num_keys as f64 {
+                continue;
+            }
+            // The envelope's density is proposal^(-s); acceptance yields rank^(-s).
+            // Evaluate the ratio in log space to avoid separately overflowing powers.
+            let acceptance = if rank == 1.0 {
+                1.0
+            } else {
+                (-self.exponent * (rank.ln() - proposal.ln())).exp()
+            };
+            let uniform: f64 = StandardUniform.sample(rng);
+            if uniform < acceptance {
+                return rank as u64 - 1;
+            }
+        }
+    }
 }
 
 impl WriteSampler {
@@ -796,14 +857,14 @@ impl WriteSampler {
         let zipf = if exponent == 0.0 {
             None
         } else {
-            Some(Zipf::new(num_keys as f64, exponent).map_err(|_| "invalid Zipf parameters")?)
+            Some(StableZipf::new(num_keys, exponent))
         };
         Ok(Self { num_keys, zipf })
     }
 
     pub fn sample(&self, rng: &mut TestRng) -> u64 {
         match &self.zipf {
-            Some(zipf) => ((zipf.sample(rng) as u64).saturating_sub(1)).min(self.num_keys - 1),
+            Some(zipf) => zipf.sample(rng),
             None => rng.next_u64() % self.num_keys,
         }
     }
@@ -861,6 +922,56 @@ where
         let idx = if insert { sampled + num_keys } else { sampled };
         let key = Sha256::hash(&[&idx.to_be_bytes()]);
         batch = batch.write(key, Some(make_fixed_value(rng)));
+    }
+    batch
+}
+
+/// Prepare sampled inputs without staging database writes. Reuse the buffer across iterations.
+pub fn prepare_sampled_writes(
+    writes: &mut Vec<(Digest, Digest)>,
+    num_writes: u64,
+    rng: &mut TestRng,
+    write_type: WriteType,
+    sampler: &WriteSampler,
+) {
+    writes.clear();
+    for _ in 0..num_writes {
+        let sampled = sampler.sample(rng);
+        let insert = match write_type {
+            WriteType::Overwrite => false,
+            WriteType::Insert => true,
+            WriteType::Mixed => rng.next_u32().is_multiple_of(2),
+        };
+        let idx = if insert {
+            sampled + sampler.num_keys
+        } else {
+            sampled
+        };
+        let key = Sha256::hash(&[&idx.to_be_bytes()]);
+        writes.push((key, make_fixed_value(rng)));
+    }
+}
+
+/// Prepare uniform inputs with the same random draws as the random-write helpers.
+pub fn prepare_random_writes(
+    writes: &mut Vec<(Digest, Digest)>,
+    num_writes: u64,
+    num_keys: u64,
+    rng: &mut TestRng,
+    write_type: WriteType,
+) {
+    let sampler = WriteSampler::new(num_keys, 0.0).expect("non-zero keyspace");
+    prepare_sampled_writes(writes, num_writes, rng, write_type, &sampler);
+}
+
+/// Stage prepared inputs in order, retaining duplicates and the input buffer.
+pub fn stage_prepared_writes<B, Db>(mut batch: B, writes: &[(Digest, Digest)]) -> B
+where
+    B: UnmerkleizedBatch<Db, K = Digest, V = Digest>,
+    Db: ?Sized,
+{
+    for &(key, value) in writes {
+        batch = batch.write(key, Some(value));
     }
     batch
 }
