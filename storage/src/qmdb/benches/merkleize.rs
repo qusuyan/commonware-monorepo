@@ -813,11 +813,12 @@ variants! {
 }
 
 cfg_if::cfg_if! {
-    if #[cfg(huge_bench)] {
-        // This tier is intentionally opt-in: a complete variant matrix at 10M active keys is a
-        // large-state experiment, not a CI benchmark. Use a Criterion name filter to select the
-        // specific `any`/`current` comparison being studied.
-        const NUM_KEYS: &[u64] = &[10_000_000];
+    if #[cfg(scale_bench)] {
+        const NUM_KEYS: &[u64] = &[1_000_000, 2_000_000, 4_000_000, 10_000_000];
+        const SYNC_NUM_KEYS: &[u64] = NUM_KEYS;
+        const CHURNED_NUM_KEYS: &[u64] = NUM_KEYS;
+    } else if #[cfg(huge_bench)] {
+        const NUM_KEYS: &[u64] = &[4_000_000];
         const SYNC_NUM_KEYS: &[u64] = NUM_KEYS;
         const CHURNED_NUM_KEYS: &[u64] = NUM_KEYS;
     } else if #[cfg(not(full_bench))] {
@@ -848,6 +849,13 @@ fn bench_merkleize(c: &mut Criterion) {
         assert!(updates > 0, "QMDB_MERKLEIZE_UPDATES must be positive");
         updates
     });
+    let fixed_keys = std::env::var("QMDB_MERKLEIZE_KEYS").ok().map(|value| {
+        let keys = value
+            .parse::<u64>()
+            .expect("QMDB_MERKLEIZE_KEYS must be a positive u64");
+        assert!(keys > 0, "QMDB_MERKLEIZE_KEYS must be positive");
+        keys
+    });
     let write_type = std::env::var("QMDB_MERKLEIZE_WRITE_TYPE")
         .ok()
         .map(|value| match value.as_str() {
@@ -866,7 +874,15 @@ fn bench_merkleize(c: &mut Criterion) {
                 &[false]
             };
             for &clear_cache in clear_cache_options {
-                for &num_keys in main_num_keys(seed_sync) {
+                let keys_buf;
+                let keys_slice: &[u64] = match fixed_keys {
+                    Some(k) => {
+                        keys_buf = [k];
+                        &keys_buf
+                    }
+                    None => main_num_keys(seed_sync),
+                };
+                for &num_keys in keys_slice {
                     for &variant in VARIANTS {
                         let options = BenchOptions {
                             variant,
