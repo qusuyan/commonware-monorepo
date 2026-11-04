@@ -19,7 +19,7 @@ use commonware_storage::{
             },
             traits::{DbAny, UnmerkleizedBatch},
             unordered::{
-                fixed::{Db as UFixed, partitioned::Db as UFixPart},
+                fixed::{BTreeDb as UBTreeFixed, Db as UFixed, partitioned::Db as UFixPart},
                 variable::Db as UVariable,
             },
         },
@@ -44,6 +44,12 @@ use rand::{
 use rand_distr::Zipf;
 use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 
+pub mod cow;
+pub mod keys;
+
+pub use cow::{ScratchDir, clone_directory};
+pub use keys::KeySet;
+
 pub type Digest = DigestOf<Sha256>;
 
 /// Default items per blob for benchmarks. This is small enough that blob boundary crossings can
@@ -62,6 +68,7 @@ pub const INIT_CACHE_SIZE: Option<NonZeroUsize> = Some(NZUsize!(1 << 18));
 // -- Fixed value (Digest), fixed storage layout --
 
 pub type AnyUFixDb<F> = UFixed<F, Context, Digest, Digest, Sha256, EightCap, Rayon>;
+pub type AnyUFixBTreeDb<F> = UBTreeFixed<F, Context, Digest, Digest, Sha256, EightCap, Rayon>;
 pub type AnyOFixDb<F> = OFixed<F, Context, Digest, Digest, Sha256, EightCap, Rayon>;
 /// Ordered "any" DB with a partitioned snapshot index (256 partitions, P=1). Exercises the
 /// partitioned ordered index's cursor (get_mut/find/update) on apply.
@@ -445,6 +452,18 @@ macro_rules! define_fixed_variants {
                     entry: AnyUnorderedFixedMmb,
                     name: "any::unordered::fixed::mmb",
                     db: $crate::common::AnyUFixDb<commonware_storage::merkle::mmb::Family>,
+                    cfg: $crate::common::any_fix_cfg,
+                }
+                {
+                    entry: AnyUnorderedBTreeFixedMmr,
+                    name: "any::unordered_btree::fixed::mmr",
+                    db: $crate::common::AnyUFixBTreeDb<commonware_storage::merkle::mmr::Family>,
+                    cfg: $crate::common::any_fix_cfg,
+                }
+                {
+                    entry: AnyUnorderedBTreeFixedMmb,
+                    name: "any::unordered_btree::fixed::mmb",
+                    db: $crate::common::AnyUFixBTreeDb<commonware_storage::merkle::mmb::Family>,
                     cfg: $crate::common::any_fix_cfg,
                 }
                 {

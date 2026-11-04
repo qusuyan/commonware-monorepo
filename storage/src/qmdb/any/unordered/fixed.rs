@@ -49,6 +49,42 @@ impl<
     }
 }
 
+/// An unordered variant of [crate::qmdb::any] specializing on fixed-size values
+/// backed by an ordered (B-Tree) index.
+///
+/// Holds the indexer structure constant (B-Tree) as an experimental control for fair
+/// comparison against [crate::qmdb::current::ordered::fixed::Db].
+///
+/// Stored entries do NOT contain `next_key` pointers or exclusion proof metadata;
+/// the B-Tree serves strictly as an in-memory key-to-location mapping.
+pub type BTreeDb<F, E, K, V, H, T, S> = super::Db<
+    F,
+    E,
+    Journal<E, Operation<F, K, V>>,
+    crate::index::ordered::Index<T, Location<F>>,
+    H,
+    Update<K, V>,
+    { crate::qmdb::any::BITMAP_CHUNK_BYTES },
+    S,
+>;
+
+impl<
+    F: Family,
+    E: Context + Spawner,
+    K: Array,
+    V: FixedValue,
+    H: Hasher,
+    T: Translator,
+    S: Strategy,
+> BTreeDb<F, E, K, V, H, T, S>
+{
+    /// Returns a [BTreeDb] QMDB initialized from `cfg`. Uncommitted log operations will be
+    /// discarded and the state of the db will be as of the last committed operation.
+    pub async fn init(context: E, cfg: Config<T, S>) -> Result<Self, Error<F>> {
+        crate::qmdb::any::init(context, cfg).await
+    }
+}
+
 /// Partitioned index variants that divide the key space into `2^(P*8)` partitions.
 ///
 /// See [partitioned::Db] for the generic type, or use the convenience aliases:
@@ -113,16 +149,53 @@ pub mod partitioned {
         }
     }
 
+    /// A partitioned variant of [super::BTreeDb] backed by a partitioned ordered index.
+    pub type BTreeDb<F, E, K, V, H, T, const P: usize, S> = crate::qmdb::any::unordered::Db<
+        F,
+        E,
+        Journal<E, Operation<F, K, V>>,
+        crate::index::partitioned::ordered::Index<T, Location<F>, P>,
+        H,
+        Update<K, V>,
+        { crate::qmdb::any::BITMAP_CHUNK_BYTES },
+        S,
+    >;
+
+    impl<
+        F: Family,
+        E: Context + Spawner,
+        K: Array,
+        V: FixedValue,
+        H: Hasher,
+        T: Translator,
+        const P: usize,
+        S: Strategy,
+    > BTreeDb<F, E, K, V, H, T, P, S>
+    {
+        /// Returns a [BTreeDb] QMDB initialized from `cfg`. Uncommitted log operations will be
+        /// discarded and the state of the db will be as of the last committed operation.
+        pub async fn init(
+            context: E,
+            cfg: Config<T, S, core::num::NonZeroUsize>,
+        ) -> Result<Self, Error<F>> {
+            crate::qmdb::any::init(context, cfg).await
+        }
+    }
+
     /// Convenience type aliases for 256 partitions (P=1).
     pub mod p256 {
         /// Fixed-value DB with 256 partitions.
         pub type Db<F, E, K, V, H, T, S> = super::Db<F, E, K, V, H, T, 1, S>;
+        /// Fixed-value BTree DB with 256 partitions.
+        pub type BTreeDb<F, E, K, V, H, T, S> = super::BTreeDb<F, E, K, V, H, T, 1, S>;
     }
 
     /// Convenience type aliases for 65,536 partitions (P=2).
     pub mod p64k {
         /// Fixed-value DB with 65,536 partitions.
         pub type Db<F, E, K, V, H, T, S> = super::Db<F, E, K, V, H, T, 2, S>;
+        /// Fixed-value BTree DB with 65,536 partitions.
+        pub type BTreeDb<F, E, K, V, H, T, S> = super::BTreeDb<F, E, K, V, H, T, 2, S>;
     }
 }
 
@@ -202,6 +275,142 @@ pub(crate) mod test {
         let seed = context.next_u64();
         let cfg = fixed_db_config::<TwoCap>(&seed.to_string(), &context);
         AnyTest::init(context, cfg).await.unwrap()
+    }
+
+    /// A type alias for the concrete [BTreeDb] type used in these unit tests.
+    pub(crate) type AnyBTreeTest =
+        BTreeDb<mmr::Family, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential>;
+
+    /// Create a test BTree database with unique partition names
+    pub(crate) async fn create_test_btree_db(mut context: Context) -> AnyBTreeTest {
+        let seed = context.next_u64();
+        let cfg = fixed_db_config::<TwoCap>(&seed.to_string(), &context);
+        AnyBTreeTest::init(context, cfg).await.unwrap()
+    }
+
+    /// Verifies bit-for-bit Merkle root parity and identical point read values between
+    /// [Db] (HashMap index) and [BTreeDb] (B-Tree index) across complex mutation sequences.
+    #[test_traced("INFO")]
+    pub fn test_any_unordered_btree_parity() {
+        fn key(i: u64) -> Digest {
+            Sha256::hash(&[&i.to_be_bytes()])
+        }
+        fn val(i: u64) -> Digest {
+            Sha256::hash(&[&(i + 50000).to_be_bytes()])
+        }
+
+        deterministic::Runner::default().start(|ctx| async move {
+            let mut db = create_test_db(ctx.child("hash")).await;
+            let mut btree_db = create_test_btree_db(ctx.child("btree")).await;
+
+            // Step 1: Insert 500 keys into both databases.
+            let mut batch_hash = db.new_batch();
+            let mut batch_btree = btree_db.new_batch();
+            for i in 0..500u64 {
+                let k = key(i);
+                let v = val(i);
+                batch_hash = batch_hash.write(k, Some(v));
+                batch_btree = batch_btree.write(k, Some(v));
+            }
+            let merkleized_hash = batch_hash.merkleize(&db, None).await.unwrap();
+            let merkleized_btree = batch_btree.merkleize(&btree_db, None).await.unwrap();
+            assert_eq!(
+                merkleized_hash.root(),
+                merkleized_btree.root(),
+                "root mismatch after initial insert"
+            );
+
+            (db, _) = db.apply_batch(merkleized_hash).await.unwrap();
+            (btree_db, _) = btree_db.apply_batch(merkleized_btree).await.unwrap();
+            db = db.commit().await.unwrap();
+            btree_db = btree_db.commit().await.unwrap();
+            assert_eq!(db.root(), btree_db.root(), "committed root mismatch after insert");
+
+            // Step 2: Mixed workload - overwrite 200 keys, delete 100 keys, insert 200 new keys.
+            let mut batch_hash = db.new_batch();
+            let mut batch_btree = btree_db.new_batch();
+            // Overwrite 0..200
+            for i in 0..200u64 {
+                let k = key(i);
+                let v = val(i + 1000);
+                batch_hash = batch_hash.write(k, Some(v));
+                batch_btree = batch_btree.write(k, Some(v));
+            }
+            // Delete 200..300
+            for i in 200..300u64 {
+                let k = key(i);
+                batch_hash = batch_hash.write(k, None);
+                batch_btree = batch_btree.write(k, None);
+            }
+            // Insert new 500..700
+            for i in 500..700u64 {
+                let k = key(i);
+                let v = val(i);
+                batch_hash = batch_hash.write(k, Some(v));
+                batch_btree = batch_btree.write(k, Some(v));
+            }
+
+            let merkleized_hash = batch_hash.merkleize(&db, None).await.unwrap();
+            let merkleized_btree = batch_btree.merkleize(&btree_db, None).await.unwrap();
+            assert_eq!(
+                merkleized_hash.root(),
+                merkleized_btree.root(),
+                "root mismatch after mixed batch"
+            );
+
+            (db, _) = db.apply_batch(merkleized_hash).await.unwrap();
+            (btree_db, _) = btree_db.apply_batch(merkleized_btree).await.unwrap();
+            db = db.commit().await.unwrap();
+            btree_db = btree_db.commit().await.unwrap();
+            assert_eq!(db.root(), btree_db.root(), "committed root mismatch after mixed batch");
+
+            // Step 3: Validate point read equality across all keys
+            for i in 0..700u64 {
+                let k = key(i);
+                let val_hash = db.get(&k).await.unwrap();
+                let val_btree = btree_db.get(&k).await.unwrap();
+                assert_eq!(val_hash, val_btree, "value mismatch for key {i}");
+            }
+
+            db.destroy().await.unwrap();
+            btree_db.destroy().await.unwrap();
+        });
+    }
+
+    /// Verifies proof generation, verification, commit, and sync on [BTreeDb].
+    #[test_traced("INFO")]
+    pub fn test_any_unordered_btree_lifecycle_and_historical_proof() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let mut db = create_test_btree_db(ctx.child("lifecycle")).await;
+
+            let mut batch = db.new_batch();
+            for i in 0..50u64 {
+                let k = Sha256::hash(&[&i.to_be_bytes()]);
+                let v = Sha256::hash(&[&(i + 100).to_be_bytes()]);
+                batch = batch.write(k, Some(v));
+            }
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db = db.commit().await.unwrap();
+            let root_hash = db.root();
+            let op_count = db.bounds().end;
+
+            // Generate and verify historical proof at location 10
+            let max_ops = NZU64!(5);
+            let (proof, ops) = db
+                .historical_proof(op_count, Location::new(10), max_ops)
+                .await
+                .unwrap();
+            assert!(verify_proof::<Sha256, _, _>(
+                &proof,
+                Location::new(10),
+                &ops,
+                &root_hash
+            ));
+
+            let db = db.sync().await.unwrap();
+            db.destroy().await.unwrap();
+        });
     }
 
     /// A [Db] over a delayed-sync storage backend.

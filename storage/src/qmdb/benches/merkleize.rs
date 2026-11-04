@@ -68,6 +68,24 @@ type AnyUFixMmb = commonware_storage::qmdb::any::unordered::fixed::Db<
     EightCap,
     Rayon,
 >;
+pub(crate) type AnyUFixBTree = commonware_storage::qmdb::any::unordered::fixed::BTreeDb<
+    commonware_storage::merkle::mmr::Family,
+    Context,
+    Digest,
+    Digest,
+    Sha256,
+    EightCap,
+    Rayon,
+>;
+type AnyUFixBTreeMmb = commonware_storage::qmdb::any::unordered::fixed::BTreeDb<
+    commonware_storage::merkle::mmb::Family,
+    Context,
+    Digest,
+    Digest,
+    Sha256,
+    EightCap,
+    Rayon,
+>;
 type AnyUVarMmb = commonware_storage::qmdb::any::unordered::variable::Db<
     commonware_storage::merkle::mmb::Family,
     Context,
@@ -745,6 +763,14 @@ variants! {
     AnyFixedMmb {
         name: "any::unordered::fixed::mmb",
         init: |ctx, page_cache| AnyUFixMmb::init(ctx.child("storage"), any_fix_cfg_with_cache(ctx, page_cache)),
+    }
+    AnyUnorderedBTreeFixed {
+        name: "any::unordered_btree::fixed::mmr",
+        init: |ctx, page_cache| AnyUFixBTree::init(ctx.child("storage"), any_fix_cfg_with_cache(ctx, page_cache)),
+    }
+    AnyUnorderedBTreeFixedMmb {
+        name: "any::unordered_btree::fixed::mmb",
+        init: |ctx, page_cache| AnyUFixBTreeMmb::init(ctx.child("storage"), any_fix_cfg_with_cache(ctx, page_cache)),
     }
     AnyVariableMmb {
         name: "any::unordered::variable::mmb",

@@ -6,8 +6,11 @@
 - **Target Files:**
   - [`storage/src/qmdb/current/unordered/fixed.rs`](file:///Users/rains/rainworkspace/UWMadison/cs698/commonware-monorepo/storage/src/qmdb/current/unordered/fixed.rs)
   - [`storage/src/qmdb/current/unordered/test_trait_impls.rs`](file:///Users/rains/rainworkspace/UWMadison/cs698/commonware-monorepo/storage/src/qmdb/current/unordered/test_trait_impls.rs)
+  - [`storage/src/qmdb/any/unordered/fixed.rs`](file:///Users/rains/rainworkspace/UWMadison/cs698/commonware-monorepo/storage/src/qmdb/any/unordered/fixed.rs)
   - [`storage/src/qmdb/benches/common.rs`](file:///Users/rains/rainworkspace/UWMadison/cs698/commonware-monorepo/storage/src/qmdb/benches/common.rs)
   - [`storage/src/qmdb/benches/merkleize.rs`](file:///Users/rains/rainworkspace/UWMadison/cs698/commonware-monorepo/storage/src/qmdb/benches/merkleize.rs)
+  - [`measurements-rain/scripts/experiment-configs.sh`](file:///Users/rains/rainworkspace/UWMadison/cs698/commonware-monorepo/measurements-rain/scripts/experiment-configs.sh)
+  - [`measurements-rain/scripts/compare-experiment.jq`](file:///Users/rains/rainworkspace/UWMadison/cs698/commonware-monorepo/measurements-rain/scripts/compare-experiment.jq)
 
 ---
 
@@ -95,25 +98,39 @@ impl<
 
 Implemented `DbAny` and `BitmapPrunedBits` for `fixed::BTreeDb` and `fixed::partitioned::BTreeDb` under `#[cfg(any(test, feature = "test-traits"))]`.
 
-### C. Benchmark Harness & Criterion Registry
+### C. Any Unordered B-Tree Control (`storage/src/qmdb/any/unordered/fixed.rs`)
+
+Defined `any::unordered::fixed::BTreeDb` (and partitioned variants) backed by `crate::index::ordered::Index`. Blanket `DbAny` and `Provable` implementations in `any/unordered/mod.rs` apply automatically.
+
+### D. Benchmark Harness & Criterion Registry
 
 1. In [`storage/src/qmdb/benches/common.rs`](file:///Users/rains/rainworkspace/UWMadison/cs698/commonware-monorepo/storage/src/qmdb/benches/common.rs):
-   - Defined `CurUFixBTreeDb<F>`.
-   - Registered `CurrentUnorderedBTreeFixedMmr` and `CurrentUnorderedBTreeFixedMmb` in `define_fixed_variants!`.
+   - Defined `CurUFixBTreeDb<F>` and `AnyUFixBTreeDb<F>`.
+   - Registered `CurrentUnorderedBTreeFixedMmr`/`Mmb` and `AnyUnorderedBTreeFixedMmr`/`Mmb` in `define_fixed_variants!`.
 2. In [`storage/src/qmdb/benches/merkleize.rs`](file:///Users/rains/rainworkspace/UWMadison/cs698/commonware-monorepo/storage/src/qmdb/benches/merkleize.rs):
-   - Defined type aliases `CurUFixBTree32` and `CurUFixBTree32Mmb`.
-   - Registered variant selector: `CurrentUnorderedBTreeFixed32Mmb` (`"current::unordered_btree::fixed::mmb chunk=32"`).
+   - Defined type aliases `CurUFixBTree32`/`Mmb` and `AnyUFixBTree`/`Mmb`.
+   - Registered variant selectors:
+     - `"current::unordered_btree::fixed::mmb chunk=32"`
+     - `"any::unordered_btree::fixed::mmb"`
+3. In [`measurements-rain/scripts/experiment-configs.sh`](file:///Users/rains/rainworkspace/UWMadison/cs698/commonware-monorepo/measurements-rain/scripts/experiment-configs.sh) and [`compare-experiment.jq`](file:///Users/rains/rainworkspace/UWMadison/cs698/commonware-monorepo/measurements-rain/scripts/compare-experiment.jq):
+   - Registered runner mapping for `any_unordered_btree` and `current_unordered_btree`.
+   - Updated `config_id` in `compare-experiment.jq` to accept `unordered_btree` for both `any` and `current`.
 
 ---
 
 ## 4. Verification & Validation Results
 
-1. **Deterministic Root Parity Test:**
+1. **Current Unordered Root Parity Test:**
    - In `storage/src/qmdb/current/unordered/fixed.rs::test`, `test_current_unordered_btree_parity()` executes identical mutation sequences on both `Db` (`HashMap`) and `BTreeDb` (`BTreeMap`).
    - Proved `assert_eq!(btree_db.root(), hash_db.root())` across 500 initial inserts, 200 overwrites, 100 deletes, and 200 new inserts, as well as 700 point get verifications.
-2. **Lifecycle & Proof Test:**
+2. **Current Unordered Lifecycle & Proof Test:**
    - `test_current_unordered_btree_lifecycle_and_proof()` verified proof generation, verification, commit, sync, and pruning on `BTreeDb`.
-3. **Full Test Suite:**
+3. **Any Unordered Parity & Proof Tests:**
+   - `test_any_unordered_btree_parity()` verifies bit-for-bit root parity and point read equality with `HashMap` over 500 initial inserts, 200 overwrites, 100 deletes, and 200 new inserts.
+   - `test_any_unordered_btree_lifecycle_and_historical_proof()` verifies commit, sync, historical proof generation, and verification.
+4. **Full Test Suites:**
+   - All 12 unit tests in `qmdb::current::unordered::fixed` passed (`12 passed; 0 failed`).
+   - All 36 unit tests in `qmdb::any::unordered::fixed` passed (`36 passed; 0 failed`).
    - All 12 unit tests in `qmdb::current::unordered::fixed` passed with 0 failures.
 4. **Criterion Benchmark Smoke Run:**
    - Successfully executed on `current::unordered_btree::fixed::mmb chunk=32` with 10,000 keys (`time: [653.49 µs 673.38 µs 708.14 µs]`).
