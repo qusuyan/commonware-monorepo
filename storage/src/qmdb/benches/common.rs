@@ -44,10 +44,16 @@ use rand::{
 use rand_distr::Zipf;
 use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 
+#[path = "artifact_io.rs"]
+pub mod artifact_io;
+#[path = "cow.rs"]
 pub mod cow;
+#[path = "keys.rs"]
 pub mod keys;
 
+#[allow(dead_code, unused_imports)]
 pub use cow::{ScratchDir, clone_directory};
+#[allow(dead_code, unused_imports)]
 pub use keys::KeySet;
 
 pub type Digest = DigestOf<Sha256>;
@@ -791,11 +797,12 @@ where
 }
 
 /// Select which key range a speculative write targets. Seeded keys occupy `0..num_keys`;
-/// insert keys occupy the disjoint range `num_keys..2*num_keys`.
-#[derive(Clone, Copy, Debug)]
+/// insert keys occupy the disjoint range `num_keys..2*num_keys`. Deletions target seeded keys.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WriteType {
     Overwrite,
     Insert,
+    Delete,
     Mixed,
 }
 
@@ -804,6 +811,7 @@ impl WriteType {
         match self {
             Self::Overwrite => "overwrite",
             Self::Insert => "insert",
+            Self::Delete => "delete",
             Self::Mixed => "mixed",
         }
     }
@@ -921,7 +929,7 @@ where
     for _ in 0..num_writes {
         let sampled = sampler.sample(rng);
         let insert = match write_type {
-            WriteType::Overwrite => false,
+            WriteType::Overwrite | WriteType::Delete => false,
             WriteType::Insert => true,
             WriteType::Mixed => rng.next_u32().is_multiple_of(2),
         };
@@ -931,7 +939,12 @@ where
             sampled
         };
         let key = Sha256::hash(&[&idx.to_be_bytes()]);
-        batch = batch.write(key, Some(make_fixed_value(rng)));
+        let value = if write_type == WriteType::Delete {
+            None
+        } else {
+            Some(make_fixed_value(rng))
+        };
+        batch = batch.write(key, value);
     }
     batch
 }
@@ -951,20 +964,25 @@ where
     for _ in 0..num_writes {
         let sampled = rng.next_u64() % num_keys;
         let insert = match write_type {
-            WriteType::Overwrite => false,
+            WriteType::Overwrite | WriteType::Delete => false,
             WriteType::Insert => true,
             WriteType::Mixed => rng.next_u32().is_multiple_of(2),
         };
         let idx = if insert { sampled + num_keys } else { sampled };
         let key = Sha256::hash(&[&idx.to_be_bytes()]);
-        batch = batch.write(key, Some(make_fixed_value(rng)));
+        let value = if write_type == WriteType::Delete {
+            None
+        } else {
+            Some(make_fixed_value(rng))
+        };
+        batch = batch.write(key, value);
     }
     batch
 }
 
 /// Prepare sampled inputs without staging database writes. Reuse the buffer across iterations.
 pub fn prepare_sampled_writes(
-    writes: &mut Vec<(Digest, Digest)>,
+    writes: &mut Vec<(Digest, Option<Digest>)>,
     num_writes: u64,
     rng: &mut TestRng,
     write_type: WriteType,
@@ -974,7 +992,7 @@ pub fn prepare_sampled_writes(
     for _ in 0..num_writes {
         let sampled = sampler.sample(rng);
         let insert = match write_type {
-            WriteType::Overwrite => false,
+            WriteType::Overwrite | WriteType::Delete => false,
             WriteType::Insert => true,
             WriteType::Mixed => rng.next_u32().is_multiple_of(2),
         };
@@ -984,13 +1002,18 @@ pub fn prepare_sampled_writes(
             sampled
         };
         let key = Sha256::hash(&[&idx.to_be_bytes()]);
-        writes.push((key, make_fixed_value(rng)));
+        let value = if write_type == WriteType::Delete {
+            None
+        } else {
+            Some(make_fixed_value(rng))
+        };
+        writes.push((key, value));
     }
 }
 
 /// Prepare uniform inputs with the same random draws as the random-write helpers.
 pub fn prepare_random_writes(
-    writes: &mut Vec<(Digest, Digest)>,
+    writes: &mut Vec<(Digest, Option<Digest>)>,
     num_writes: u64,
     num_keys: u64,
     rng: &mut TestRng,
@@ -1001,13 +1024,13 @@ pub fn prepare_random_writes(
 }
 
 /// Stage prepared inputs in order, retaining duplicates and the input buffer.
-pub fn stage_prepared_writes<B, Db>(mut batch: B, writes: &[(Digest, Digest)]) -> B
+pub fn stage_prepared_writes<B, Db>(mut batch: B, writes: &[(Digest, Option<Digest>)]) -> B
 where
     B: UnmerkleizedBatch<Db, K = Digest, V = Digest>,
     Db: ?Sized,
 {
     for &(key, value) in writes {
-        batch = batch.write(key, Some(value));
+        batch = batch.write(key, value);
     }
     batch
 }

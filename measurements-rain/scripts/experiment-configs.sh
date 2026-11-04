@@ -6,6 +6,15 @@ experiment_modes() {
         2) modes=(current_ordered any_unordered current_unordered) ;;
     esac
 }
+
+# Pairwise selection of the standard Any unordered and Current ordered variants.
+experiment_modes_pairwise() {
+    case $(( ($1 - 1) % 2 )) in
+        0) modes=(any_unordered current_ordered) ;;
+        1) modes=(current_ordered any_unordered) ;;
+    esac
+}
+
 experiment_variant() {
     case "$1" in
         any_unordered) variant="any::unordered::fixed::mmb" ;;

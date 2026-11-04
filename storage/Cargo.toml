@@ -40,9 +40,13 @@ commonware-math.workspace = true
 commonware-runtime = { workspace = true, features = ["test-utils"] }
 commonware-storage = { path = ".", features = ["std", "test-utils"] }
 criterion.workspace = true
+libc = { workspace = true }
 paste.workspace = true
 rand = { workspace = true, features = ["alloc"] }
 rand_distr.workspace = true
+rayon = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 rstest.workspace = true
 tracing-subscriber.workspace = true
 

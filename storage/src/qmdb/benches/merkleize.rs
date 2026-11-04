@@ -515,7 +515,7 @@ where
     new_child: fn(&C::Merkleized) -> C::Batch,
     rng: TestRng,
     sampler: WriteSampler,
-    prepared_writes: Vec<(Digest, Digest)>,
+    prepared_writes: Vec<(Digest, Option<Digest>)>,
     parent: Option<C::Merkleized>,
     start_metrics: BlobMetrics,
     _family: PhantomData<F>,
@@ -915,8 +915,9 @@ fn bench_merkleize(c: &mut Criterion) {
         .map(|value| match value.as_str() {
             "overwrite" => WriteType::Overwrite,
             "insert" => WriteType::Insert,
+            "delete" => WriteType::Delete,
             "mixed" => WriteType::Mixed,
-            _ => panic!("QMDB_MERKLEIZE_WRITE_TYPE must be overwrite, insert, or mixed"),
+            _ => panic!("QMDB_MERKLEIZE_WRITE_TYPE must be overwrite, insert, delete, or mixed"),
         });
     // This is a Cartesian sweep. Each name encodes the database representation and
     // starting state so Criterion results remain comparable after they are archived.

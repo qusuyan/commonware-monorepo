@@ -8,6 +8,7 @@ use common::{
     Digest, WriteSampler, WriteType, prepare_random_writes, prepare_sampled_writes,
     stage_prepared_writes, write_random_updates, write_random_writes, write_sampled_writes,
 };
+use commonware_cryptography::Hasher as _;
 use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
 use commonware_storage::{
     merkle::{self, mmr::Family},
@@ -26,6 +27,59 @@ use rand::Rng as _;
 struct Writes(Vec<(Digest, Option<Digest>)>);
 
 struct Root;
+
+#[test]
+fn mixed_writes_preserve_legacy_draw_order() {
+    for exponent in [0.0, 0.75, 3.0] {
+        let sampler = WriteSampler::new(100, exponent).unwrap();
+        let mut expected_rng = TestRng::new(99);
+        let mut direct_rng = TestRng::new(99);
+        let mut prepared_rng = TestRng::new(99);
+        let mut prepared = Vec::new();
+        for count in [32, 0, 16] {
+            let expected: Vec<_> = (0..count)
+                .map(|_| {
+                    let sampled = sampler.sample(&mut expected_rng);
+                    let insert = expected_rng.next_u32().is_multiple_of(2);
+                    let idx = sampled + if insert { 100 } else { 0 };
+                    (
+                        commonware_cryptography::Sha256::hash(&[&idx.to_be_bytes()]),
+                        Some(common::make_fixed_value(&mut expected_rng)),
+                    )
+                })
+                .collect();
+            let direct = if exponent == 0.0 {
+                write_random_writes(
+                    Writes::default(),
+                    count,
+                    100,
+                    &mut direct_rng,
+                    WriteType::Mixed,
+                )
+            } else {
+                write_sampled_writes(
+                    Writes::default(),
+                    count,
+                    &mut direct_rng,
+                    WriteType::Mixed,
+                    &sampler,
+                )
+            };
+            prepare_sampled_writes(
+                &mut prepared,
+                count,
+                &mut prepared_rng,
+                WriteType::Mixed,
+                &sampler,
+            );
+            assert_eq!(direct.0, expected);
+            assert_eq!(prepared, expected);
+        }
+        let expected_next = expected_rng.next_u64();
+        assert_eq!(direct_rng.next_u64(), expected_next);
+        assert_eq!(prepared_rng.next_u64(), expected_next);
+    }
+}
 
 impl MerkleizedBatch for Root {
     type Digest = Digest;
@@ -56,7 +110,12 @@ impl UnmerkleizedBatch<()> for Writes {
 fn preparation_preserves_operations_and_rng_across_iterations() {
     for exponent in [0.0, 0.75, 1.0, 3.0] {
         let sampler = WriteSampler::new(4, exponent).unwrap();
-        for write_type in [WriteType::Overwrite, WriteType::Insert, WriteType::Mixed] {
+        for write_type in [
+            WriteType::Overwrite,
+            WriteType::Insert,
+            WriteType::Delete,
+            WriteType::Mixed,
+        ] {
             let mut original_rng = TestRng::new(99);
             let mut prepared_rng = TestRng::new(99);
             let mut inputs = Vec::new();
@@ -123,6 +182,17 @@ type CurrentTestDb<F> = commonware_storage::qmdb::current::unordered::fixed::Db<
     commonware_parallel::Rayon,
 >;
 
+type CurrentOrderedTestDb<F> = commonware_storage::qmdb::current::ordered::fixed::Db<
+    F,
+    deterministic::Context,
+    Digest,
+    Digest,
+    commonware_cryptography::Sha256,
+    commonware_storage::translator::EightCap,
+    32,
+    commonware_parallel::Rayon,
+>;
+
 async fn assert_equivalent_roots<F, C>(db: C, new_child: fn(&C::Merkleized) -> C::Batch)
 where
     F: merkle::Family,
@@ -133,7 +203,12 @@ where
     let mut inputs = Vec::new();
     for exponent in [0.0, 0.75, 3.0] {
         let sampler = WriteSampler::new(4, exponent).unwrap();
-        for write_type in [WriteType::Overwrite, WriteType::Insert, WriteType::Mixed] {
+        for write_type in [
+            WriteType::Overwrite,
+            WriteType::Insert,
+            WriteType::Delete,
+            WriteType::Mixed,
+        ] {
             for chained in [false, true] {
                 let mut original_rng = TestRng::new(99);
                 let mut prepared_rng = TestRng::new(99);
@@ -293,5 +368,87 @@ fn criterion_boundary_excludes_preparation_delay() {
             "boundary probe: wall={wall:?}, reported={measured:?}, excluded={:?}",
             wall.saturating_sub(measured)
         );
+    });
+}
+
+async fn assert_workload_commit<C>(db: C, write_type: WriteType)
+where
+    C: DbAny<merkle::mmb::Family, Key = Digest, Value = Digest, Digest = Digest>,
+    C::Merkleized: MerkleizedBatch<Digest = Digest>,
+{
+    let db = common::seed_db(db, 100).await;
+    let initial_root = db.root();
+    let mut original = Vec::new();
+    for i in 0u64..200 {
+        let key = commonware_cryptography::Sha256::hash(&[&i.to_be_bytes()]);
+        let value = db.get(&key).await.unwrap();
+        assert_eq!(value.is_some(), i < 100);
+        original.push((key, value));
+    }
+
+    let mut writes = Vec::new();
+    prepare_random_writes(&mut writes, 20, 100, &mut TestRng::new(1234), write_type);
+    for &(key, value) in &writes {
+        assert_eq!(value.is_none(), write_type == WriteType::Delete);
+        assert_eq!(
+            db.get(&key).await.unwrap().is_some(),
+            write_type != WriteType::Insert
+        );
+    }
+    // Include an explicit duplicate to exercise last-write-wins staging.
+    writes.push(writes[0]);
+    let mut expected = original.clone();
+    for &(key, value) in &writes {
+        expected.iter_mut().find(|(k, _)| *k == key).unwrap().1 = value;
+    }
+
+    // Discard a speculative batch as Criterion does; the same keys must remain usable.
+    let speculative = stage_prepared_writes::<_, C>(db.new_batch(), &writes)
+        .merkleize(&db, None)
+        .await
+        .unwrap();
+    let expected_root = speculative.root();
+    assert_ne!(initial_root, expected_root);
+    drop(speculative);
+    assert_eq!(db.root(), initial_root);
+    for (key, value) in &original {
+        assert_eq!(db.get(key).await.unwrap(), *value);
+    }
+
+    let merkleized = stage_prepared_writes::<_, C>(db.new_batch(), &writes)
+        .merkleize(&db, None)
+        .await
+        .unwrap();
+    assert_eq!(merkleized.root(), expected_root);
+    let (db, _) = db.apply_batch(merkleized).await.unwrap();
+    let db = db.commit().await.unwrap();
+    assert_eq!(db.root(), expected_root);
+    // Check every seeded and insert-range key, including unchanged survivor values.
+    for (key, value) in expected {
+        assert_eq!(db.get(&key).await.unwrap(), value);
+    }
+    db.destroy().await.unwrap();
+}
+
+#[test]
+fn pure_workloads_commit_on_measured_variants() {
+    deterministic::Runner::default().start(|context| async move {
+        for write_type in [WriteType::Overwrite, WriteType::Insert, WriteType::Delete] {
+            let db = AnyTestDb::<merkle::mmb::Family>::init(
+                context.child("any_unordered").child(write_type.name()),
+                common::any_fix_cfg(&context),
+            )
+            .await
+            .unwrap();
+            assert_workload_commit(db, write_type).await;
+
+            let db = CurrentOrderedTestDb::<merkle::mmb::Family>::init(
+                context.child("current_ordered").child(write_type.name()),
+                common::cur_fix_cfg(&context),
+            )
+            .await
+            .unwrap();
+            assert_workload_commit(db, write_type).await;
+        }
     });
 }

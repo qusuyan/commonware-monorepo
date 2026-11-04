@@ -32,9 +32,9 @@ while IFS= read -r estimate; do
     benchmark="$(jq -r '.full_id' "$benchmark_json")"
 
     # Expected form:
-    # qmdb::merkleize/v=<any|current>::<ordered|unordered>::<fixed|variable>::<mmr|mmb>
-    # [chunk=N] k=N [u=N] [w=<overwrite|insert|mixed>] [zipf=S] ch=<bool> s=<bool> cc=<bool>
-    if [[ "$benchmark" =~ ^qmdb::merkleize/v=([^[:space:]]+)(\ chunk=([0-9]+))?\ k=([0-9]+)(\ u=([0-9]+))?(\ w=(overwrite|insert|mixed))?(\ zipf=([^[:space:]]+))?\ ch=(true|false)\ s=(true|false)\ cc=(true|false)$ ]]; then
+    # qmdb::merkleize/v=<any|current>::<ordered|unordered|unordered_btree>::<fixed|variable>::<mmr|mmb>
+    # [chunk=N] k=N [u=N] [w=<overwrite|insert|delete|mixed>] [zipf=S] ch=<bool> s=<bool> cc=<bool>
+    if [[ "$benchmark" =~ ^qmdb::merkleize/v=([^[:space:]]+)(\ chunk=([0-9]+))?\ k=([0-9]+)(\ u=([0-9]+))?(\ w=(overwrite|insert|delete|mixed))?(\ zipf=([^[:space:]]+))?\ ch=(true|false)\ s=(true|false)\ cc=(true|false)$ ]]; then
         variant="${BASH_REMATCH[1]}"
         chunk="${BASH_REMATCH[3]:-}"
         keys="${BASH_REMATCH[4]}"
@@ -45,7 +45,7 @@ while IFS= read -r estimate; do
         synced="${BASH_REMATCH[12]}"
         cache_cleared="${BASH_REMATCH[13]}"
         skew="$("$root/scripts/validate-skew.sh" "$skew")"
-        generation_timed=true
+        generation_timed=false
 
         auth_mode="${variant%%::*}"
         remainder="${variant#*::}"

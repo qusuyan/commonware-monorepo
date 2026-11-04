@@ -38,16 +38,22 @@ add_case fractional "$base u=1000 w=insert zipf=0.75 ch=false s=true cc=false"
 add_case large "$base u=1000 w=mixed zipf=3 ch=true s=false cc=false"
 add_case scientific "$base u=1000 zipf=1e-8 ch=false s=true cc=false"
 add_case component 'qmdb::component/component=bitmap_mutation family=na keys=0 updates=1024 locality=repeated chunk=32'
+add_case delete 'qmdb::merkleize/v=any::unordered_btree::fixed::mmb k=10000 u=1000 w=delete ch=false s=true cc=false'
+add_case ordered-delete 'qmdb::merkleize/v=current::ordered::fixed::mmb chunk=32 k=10000 u=1000 w=delete ch=false s=true cc=false'
 "$root/scripts/summarize-criterion.sh" "$run_id"
 jq -e '
-    length == 6 and
-    all(.[] | select(.auth_mode == "any"); .input_generation_timed == true and .write_calls_per_batch == 1000) and
+    length == 8 and
+    all(.[] | select(.auth_mode == "any"); .input_generation_timed == false and .write_calls_per_batch == 1000) and
     ([.[] | select(.benchmark | contains("zipf=0.75"))][0] |
         .write_skew_exponent == 0.75 and .write_type == "insert") and
     ([.[] | select(.benchmark | contains("zipf=3 "))][0] |
         .write_skew_exponent == 3 and .write_type == "mixed" and .batch_parent == "one pending speculative parent") and
     ([.[] | select(.benchmark | contains("zipf=1e-8"))][0].write_skew_exponent == 1e-8) and
     ([.[] | select(.benchmark | contains(" zipf=") | not) | select(.auth_mode == "any")][0].write_skew_exponent == 0) and
+    ([.[] | select(.write_type == "delete")] |
+        length == 2 and all(.[]; .write_calls_per_batch == 1000 and .keyspace_keys == "10000") and
+        any(.[]; .auth_mode == "any" and .index_order == "unordered_btree" and .bitmap_chunk_bytes == "") and
+        any(.[]; .auth_mode == "current" and .index_order == "ordered" and .bitmap_chunk_bytes == "32")) and
     ([.[] | select(.benchmark | startswith("qmdb::component/"))][0] |
         .write_skew_exponent == null and .input_generation_timed == null)
 ' "$run_dir/summary.json" >/dev/null
