@@ -1,8 +1,8 @@
 //! Benchmarks for speculative batch merkleization.
 //!
-//! Each iteration creates a speculative batch (10% random writes by default, sampled with
-//! replacement), merkleizes it, and reads the root. The per-iteration writes + `merkleize` +
-//! `root()` is timed; one-time setup (seed, churn batches, sync) is not.
+//! Each iteration prepares keys and values outside timing (10% random writes by default,
+//! sampled with replacement). Batch creation, staging writes, `merkleize`, and `root()` are
+//! timed; input generation and setup (seed, churn batches, sync) are not.
 //!
 //! - [`bench_merkleize`]: timing on a freshly seeded DB (no prior overwrites).
 //! - [`bench_merkleize_churned`]: timing after overwrite batches have accumulated inactive
@@ -10,7 +10,8 @@
 //!   optimizes for.
 
 use crate::common::{
-    CHUNK_SIZE, Digest, WRITE_BUFFER_SIZE, WriteSampler, WriteType, parse_write_skew, seed_db,
+    CHUNK_SIZE, Digest, WRITE_BUFFER_SIZE, WriteSampler, WriteType, parse_write_skew,
+    prepare_random_writes, prepare_sampled_writes, seed_db, stage_prepared_writes,
     write_random_updates, write_random_writes, write_sampled_writes,
 };
 use commonware_bench::{Benchmark, Metric, Workload};
@@ -407,10 +408,18 @@ async fn run_churned_bench<F: merkle::Family, C: DbAny<F, Key = Digest, Value = 
     let db = db.commit().await.unwrap();
     let db = db.sync().await.unwrap();
 
+    let mut prepared_writes = Vec::new();
     let mut total = Duration::ZERO;
     for _ in 0..iters {
+        prepare_random_writes(
+            &mut prepared_writes,
+            num_updates,
+            num_keys,
+            &mut rng,
+            WriteType::Overwrite,
+        );
         let start = Instant::now();
-        let batch = write_random_updates(db.new_batch(), num_updates, num_keys, &mut rng);
+        let batch = stage_prepared_writes(db.new_batch(), &prepared_writes);
         let merkleized = batch.merkleize(&db, None).await.unwrap();
         black_box(merkleized.root());
         total += start.elapsed();
@@ -468,6 +477,7 @@ where
     new_child: fn(&C::Merkleized) -> C::Batch,
     rng: TestRng,
     sampler: WriteSampler,
+    prepared_writes: Vec<(Digest, Digest)>,
     parent: Option<C::Merkleized>,
     start_metrics: BlobMetrics,
     _family: PhantomData<F>,
@@ -494,6 +504,7 @@ where
             rng: TestRng::new(99),
             sampler: WriteSampler::new(options.num_keys, options.skew.unwrap_or(0.0))
                 .expect("valid keyspace and write skew"),
+            prepared_writes: Vec::new(),
             parent: None,
             start_metrics: BlobMetrics::default(),
             _family: PhantomData,
@@ -532,42 +543,59 @@ where
     }
 
     async fn before_iter(&mut self) {
-        if !self.options.chained {
-            return;
+        if self.options.chained {
+            let Some(db) = self.db.as_ref() else {
+                panic!("database must be present before iteration");
+            };
+            // Match the timed child's write count, whether it is fixed or 10% of the keyspace.
+            let num_updates = self.options.num_updates();
+            // Build the parent before the timer starts. The timed child therefore measures
+            // the extra lookup and Merkle work caused by one pending speculative ancestor.
+            // The parent only touches seeded keys, so timed inserts remain new even in a chain.
+            let batch = if self.options.skew.unwrap_or(0.0) > 0.0 {
+                write_sampled_writes(
+                    db.new_batch(),
+                    num_updates,
+                    &mut self.rng,
+                    WriteType::Overwrite,
+                    &self.sampler,
+                )
+            } else {
+                write_random_writes(
+                    db.new_batch(),
+                    num_updates,
+                    self.options.num_keys,
+                    &mut self.rng,
+                    WriteType::Overwrite,
+                )
+            };
+            self.parent = Some(batch.merkleize(db, None).await.unwrap());
         }
-        let Some(db) = self.db.as_ref() else {
-            panic!("database must be present before iteration");
-        };
-        // Match the timed child's write count, whether it is fixed or 10% of the keyspace.
         let num_updates = self.options.num_updates();
-        // Build the parent before the timer starts. The timed child therefore measures
-        // the extra lookup and Merkle work caused by one pending speculative ancestor.
-        // The parent only touches seeded keys, so timed inserts remain new even in a chain.
-        let batch = if self.options.skew.unwrap_or(0.0) > 0.0 {
-            write_sampled_writes(
-                db.new_batch(),
+        let write_type = self.options.write_type.unwrap_or(WriteType::Overwrite);
+        if self.options.skew.unwrap_or(0.0) > 0.0 {
+            prepare_sampled_writes(
+                &mut self.prepared_writes,
                 num_updates,
                 &mut self.rng,
-                WriteType::Overwrite,
+                write_type,
                 &self.sampler,
-            )
+            );
         } else {
-            write_random_updates(
-                db.new_batch(),
+            prepare_random_writes(
+                &mut self.prepared_writes,
                 num_updates,
                 self.options.num_keys,
                 &mut self.rng,
-            )
-        };
-        self.parent = Some(batch.merkleize(db, None).await.unwrap());
+                write_type,
+            );
+        }
     }
 
     async fn iter(&mut self) -> Self::Output {
         let Some(db) = self.db.as_ref() else {
             panic!("database must be present during iteration");
         };
-        // Sampling is with replacement: a batch can select the same key more than once.
-        let num_updates = self.options.num_updates();
         let batch = if self.options.chained {
             let Some(parent) = self.parent.as_ref() else {
                 panic!("parent must be prepared before chained iteration");
@@ -576,31 +604,8 @@ where
         } else {
             db.new_batch()
         };
-        let batch = if self.options.skew.unwrap_or(0.0) > 0.0 {
-            write_sampled_writes(
-                batch,
-                num_updates,
-                &mut self.rng,
-                self.options.write_type.unwrap_or(WriteType::Overwrite),
-                &self.sampler,
-            )
-        } else {
-            match self.options.write_type {
-                Some(write_type) => write_random_writes(
-                    batch,
-                    num_updates,
-                    self.options.num_keys,
-                    &mut self.rng,
-                    write_type,
-                ),
-                None => {
-                    write_random_updates(batch, num_updates, self.options.num_keys, &mut self.rng)
-                }
-            }
-        };
-        // Batch writes, `merkleize`, and `root` are deliberately all inside
-        // the timed interval: this is an end-to-end speculative-batch cost, not a
-        // hash-function microbenchmark.
+        let batch = stage_prepared_writes(batch, &self.prepared_writes);
+        // Input generation is excluded; database staging and Merkle work are timed.
         let merkleized = batch.merkleize(db, None).await.unwrap();
         merkleized.root()
     }
