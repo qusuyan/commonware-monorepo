@@ -28,6 +28,7 @@ const ANY_UNORDERED_FIXED_MMR: BenchOptions = BenchOptions {
     chained: false,
     seed_sync: true,
     clear_cache: true,
+    snapshot_dir: None,
 };
 
 const CURRENT_ORDERED_FIXED_MMB_CHUNK_256: BenchOptions = BenchOptions {
@@ -39,6 +40,7 @@ const CURRENT_ORDERED_FIXED_MMB_CHUNK_256: BenchOptions = BenchOptions {
     chained: false,
     seed_sync: true,
     clear_cache: true,
+    snapshot_dir: None,
 };
 
 async fn run(context: Context, options: BenchOptions) -> Digest {

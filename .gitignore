@@ -5,6 +5,10 @@ benchmark-tracking-results
 measurements-rain/results/*
 !measurements-rain/results/.gitkeep
 !measurements-rain/results/README.md
+measurements-rain/data/*.bin
+measurements-rain/data/*.bin.json
+measurements-rain/data/*.lock
+measurements-rain/storage-seeds/
 *.vscode
 .idea
 examples/flood/assets

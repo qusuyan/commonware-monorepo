@@ -40,7 +40,9 @@ add_case scientific "$base u=1000 zipf=1e-8 ch=false s=true cc=false"
 add_case component 'qmdb::component/component=bitmap_mutation family=na keys=0 updates=1024 locality=repeated chunk=32'
 add_case delete 'qmdb::merkleize/v=any::unordered_btree::fixed::mmb k=10000 u=1000 w=delete ch=false s=true cc=false'
 add_case ordered-delete 'qmdb::merkleize/v=current::ordered::fixed::mmb chunk=32 k=10000 u=1000 w=delete ch=false s=true cc=false'
+printf '%s\n' 'compiler output' '{"qmdb_setup":true,"source":"reused","initial_root":"abc"}' > "$run_dir/output.log"
 "$root/scripts/summarize-criterion.sh" "$run_id"
+jq -se 'length == 1 and .[0].source == "reused"' "$run_dir/setup-provenance.ndjson" >/dev/null
 jq -e '
     length == 8 and
     all(.[] | select(.auth_mode == "any"); .input_generation_timed == false and .write_calls_per_batch == 1000) and

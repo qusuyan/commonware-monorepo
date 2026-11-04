@@ -17,7 +17,14 @@ This reduces order bias; it does not eliminate machine drift or measurement nois
 Both configurations use fixed 32-byte keys and values, MMB,
 4M seeded keys, direct batches (`ch=false`), a synced seed (`s=true`), and a
 retained Commonware page cache (`cc=false`). Current uses 32-byte bitmap chunks.
-Both engines build and sync their seed outside timing.
+The default snapshot reuse policy requires saved seeds for Current ordered:
+
+```bash
+measurements-rain/scripts/seed-db.sh --variant current_ordered --count 4000000
+```
+
+Any unordered builds its seed outside timing. Set `QMDB_SNAPSHOT_REUSE=off`
+to build the Current ordered seed fresh outside timing as well.
 `QMDB_MERKLEIZE_KEYS` can override the default key count.
 
 Overwrites and deletions draw indices from the seeded range `0..K`; inserts draw

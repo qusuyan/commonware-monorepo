@@ -10,32 +10,33 @@
 //!   optimizes for.
 
 use crate::common::{
-    CHUNK_SIZE, Digest, WRITE_BUFFER_SIZE, WriteSampler, WriteType, parse_write_skew,
-    prepare_random_writes, prepare_sampled_writes, seed_db, stage_prepared_writes,
-    write_random_updates, write_random_writes, write_sampled_writes,
+    CHUNK_SIZE, Digest, WRITE_BUFFER_SIZE, WriteSampler, WriteType, merkleize_config::Descriptor,
+    parse_write_skew, prepare_random_writes, prepare_sampled_writes, seed_db, snapshots,
+    stage_prepared_writes, write_random_updates, write_random_writes, write_sampled_writes,
 };
 use commonware_bench::{Benchmark, Metric, Workload};
 use commonware_cryptography::Sha256;
 use commonware_macros::boxed;
 use commonware_parallel::Rayon;
 use commonware_runtime::{
-    BufferPooler, Metrics as _, Strategizer, Supervisor as _,
+    BufferPooler, Metrics as _, Runner as _, Strategizer, Supervisor as _,
     benchmarks::{context, tokio},
     buffer::paged::CacheRef,
     tokio::{Config, Context},
 };
 use commonware_storage::{
-    journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
+    journal::contiguous::variable::Config as VConfig,
     merkle::{self, full},
     qmdb::any::traits::{DbAny, MerkleizedBatch, UnmerkleizedBatch as _},
     translator::EightCap,
 };
-use commonware_utils::{NZU16, NZU64, NZUsize, TestRng};
+use commonware_utils::{NZUsize, TestRng};
 use criterion::{Criterion, criterion_group};
 use std::{
     hint::black_box,
     marker::PhantomData,
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
+    path::PathBuf,
     time::{Duration, Instant},
 };
 
@@ -320,34 +321,13 @@ type CurOVar256Mmb = commonware_storage::qmdb::current::ordered::variable::Db<
 // -- Config --
 
 // Use huge blobs to avoid iteration times being affected by blob boundary crossings.
-const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000_000);
-const THREADS: NonZeroUsize = NZUsize!(8);
-pub(crate) const PAGE_SIZE: NonZeroU16 = NZU16!(4096);
-// Large enough such that most reads hit the cache. This is the normal in-memory
-// baseline; `SMALL_PAGE_CACHE_SIZE` is used only to make avoidable reads visible.
-pub(crate) const LARGE_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(16_384);
-// Very small so most reads miss the cache.
+const ITEMS_PER_BLOB: NonZeroU64 = crate::common::merkleize_config::ITEMS_PER_BLOB;
+pub(crate) const PAGE_SIZE: NonZeroU16 = crate::common::merkleize_config::PAGE_SIZE;
+pub(crate) const LARGE_PAGE_CACHE_SIZE: NonZeroUsize = crate::common::merkleize_config::CACHE_PAGES;
 const SMALL_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(32);
-const PARTITION: &str = "bench-merkleize";
-
+const PARTITION: &str = crate::common::merkleize_config::PARTITION;
 fn merkle_cfg(ctx: &(impl BufferPooler + Strategizer), pc: CacheRef) -> full::Config<Rayon> {
-    full::Config {
-        journal_partition: format!("journal-{PARTITION}"),
-        metadata_partition: format!("metadata-{PARTITION}"),
-        items_per_blob: ITEMS_PER_BLOB,
-        write_buffer: WRITE_BUFFER_SIZE,
-        strategy: ctx.strategy(THREADS),
-        page_cache: pc,
-    }
-}
-
-fn fix_log_cfg(pc: CacheRef) -> FConfig {
-    FConfig {
-        partition: format!("log-journal-{PARTITION}"),
-        items_per_blob: ITEMS_PER_BLOB,
-        page_cache: pc,
-        write_buffer: WRITE_BUFFER_SIZE,
-    }
+    Descriptor::production().merkle(ctx, pc)
 }
 
 fn var_log_cfg(pc: CacheRef) -> VConfig<((), ())> {
@@ -367,14 +347,7 @@ pub(crate) fn any_fix_cfg_with_cache(
     ctx: &(impl BufferPooler + Strategizer),
     pc: CacheRef,
 ) -> commonware_storage::qmdb::any::FixedConfig<EightCap, Rayon> {
-    commonware_storage::qmdb::any::FixedConfig {
-        merkle_config: merkle_cfg(ctx, pc.clone()),
-        journal_config: fix_log_cfg(pc),
-        translator: EightCap,
-        init_cache_size: crate::common::INIT_CACHE_SIZE,
-        init_buffer: NZUsize!(1 << 21),
-        init_concurrency: (),
-    }
+    Descriptor::production().any(ctx, pc)
 }
 
 fn any_var_cfg_with_cache(
@@ -395,15 +368,7 @@ pub(crate) fn cur_fix_cfg_with_cache(
     ctx: &(impl BufferPooler + Strategizer),
     pc: CacheRef,
 ) -> commonware_storage::qmdb::current::FixedConfig<EightCap, Rayon> {
-    commonware_storage::qmdb::current::FixedConfig {
-        merkle_config: merkle_cfg(ctx, pc.clone()),
-        journal_config: fix_log_cfg(pc),
-        grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),
-        translator: EightCap,
-        init_cache_size: crate::common::INIT_CACHE_SIZE,
-        init_buffer: NZUsize!(1 << 21),
-        init_concurrency: (),
-    }
+    Descriptor::production().current(ctx, pc)
 }
 
 fn cur_var_cfg_with_cache(
@@ -466,7 +431,7 @@ async fn run_churned_bench<F: merkle::Family, C: DbAny<F, Key = Digest, Value = 
     total
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct BenchOptions {
     pub(crate) variant: Variant,
     pub(crate) num_keys: u64,
@@ -476,14 +441,15 @@ pub(crate) struct BenchOptions {
     pub(crate) chained: bool,
     pub(crate) seed_sync: bool,
     pub(crate) clear_cache: bool,
+    pub(crate) snapshot_dir: Option<PathBuf>,
 }
 
 impl BenchOptions {
-    fn num_updates(self) -> u64 {
+    fn num_updates(&self) -> u64 {
         self.fixed_updates.unwrap_or(self.num_keys / 10)
     }
 
-    pub(crate) fn benchmark(self) -> Benchmark {
+    pub(crate) fn benchmark(&self) -> Benchmark {
         let mut benchmark = Benchmark::new("qmdb::merkleize")
             .with_param("v", self.variant.name())
             .with_param("k", self.num_keys);
@@ -533,6 +499,8 @@ where
         options: BenchOptions,
         new_child: fn(&C::Merkleized) -> C::Batch,
     ) -> Self {
+        let sampler = WriteSampler::new(options.num_keys, options.skew.unwrap_or(0.0))
+            .expect("valid keyspace and write skew");
         Self {
             context,
             db: Some(db),
@@ -540,8 +508,7 @@ where
             options,
             new_child,
             rng: TestRng::new(99),
-            sampler: WriteSampler::new(options.num_keys, options.skew.unwrap_or(0.0))
-                .expect("valid keyspace and write skew"),
+            sampler,
             prepared_writes: Vec::new(),
             parent: None,
             start_metrics: BlobMetrics::default(),
@@ -559,17 +526,20 @@ where
     type Output = Digest;
 
     async fn setup(&mut self) {
-        let Some(db) = self.db.take() else {
+        let Some(mut db) = self.db.take() else {
             panic!("database must be present during setup");
         };
-        // Create one durable logical state before sampling. Its construction is deliberately
-        // excluded: otherwise an initial bulk insert would dominate a measurement meant to
-        // describe one later speculative batch.
-        let mut db = seed_db(db, self.options.num_keys).await;
-        if self.options.seed_sync {
-            // A synced seed makes subsequent reads representative of reopening from a durable
-            // state. Without it, the normal write buffers remain available to the benchmark.
-            db = db.sync().await.unwrap();
+        // If snapshot_dir is present, the database was opened from a pre-seeded, synced snapshot.
+        if self.options.snapshot_dir.is_none() {
+            // Create one durable logical state before sampling. Its construction is deliberately
+            // excluded: otherwise an initial bulk insert would dominate a measurement meant to
+            // describe one later speculative batch.
+            db = seed_db(db, self.options.num_keys).await;
+            if self.options.seed_sync {
+                // A synced seed makes subsequent reads representative of reopening from a durable
+                // state. Without it, the normal write buffers remain available to the benchmark.
+                db = db.sync().await.unwrap();
+            }
         }
         self.db = Some(db);
         if self.options.clear_cache {
@@ -652,7 +622,12 @@ where
         let Some(db) = self.db.take() else {
             return;
         };
-        db.destroy().await.unwrap();
+        if self.options.snapshot_dir.is_some() {
+            // Master seed snapshot is persisted on disk: keep pristine and do not destroy.
+            drop(db);
+        } else {
+            db.destroy().await.unwrap();
+        }
     }
 
     fn metrics(&self) -> Vec<Metric> {
@@ -891,7 +866,6 @@ const fn main_num_keys(seed_sync: bool) -> &'static [u64] {
 }
 
 fn bench_merkleize(c: &mut Criterion) {
-    let runner = tokio::Runner::new(Config::default());
     let skew = std::env::var("QMDB_MERKLEIZE_SKEW").ok().map(|value| {
         parse_write_skew(&value)
             .expect("QMDB_MERKLEIZE_SKEW must be a finite, non-negative exponent")
@@ -929,14 +903,10 @@ fn bench_merkleize(c: &mut Criterion) {
                 &[false]
             };
             for &clear_cache in clear_cache_options {
-                let keys_buf;
-                let keys_slice: &[u64] = match fixed_keys {
-                    Some(k) => {
-                        keys_buf = [k];
-                        &keys_buf
-                    }
-                    None => main_num_keys(seed_sync),
-                };
+                let keys_buf = fixed_keys.map(|k| [k]);
+                let keys_slice = keys_buf
+                    .as_ref()
+                    .map_or_else(|| main_num_keys(seed_sync), |keys| keys.as_slice());
                 for &num_keys in keys_slice {
                     for &variant in VARIANTS {
                         let options = BenchOptions {
@@ -948,19 +918,51 @@ fn bench_merkleize(c: &mut Criterion) {
                             chained,
                             seed_sync,
                             clear_cache,
+                            snapshot_dir: None,
                         };
                         let benchmark = options.benchmark();
                         let name = benchmark.name().to_string();
                         c.bench_function(&name, |b| {
-                            b.to_async(&runner).iter_custom(|iters| {
-                                let benchmark = benchmark.clone();
-                                async move {
-                                    let ctx = context::get::<Context>();
+                            // Criterion invokes this only for selected cases. Artifact resolution
+                            // must not run while enumerating filtered-out variants.
+                            let supported = snapshots::Variant::parse(variant.name())
+                                .ok()
+                                .filter(|_| seed_sync);
+                            let selected_mode = snapshots::ReuseMode::parse(
+                                std::env::var("QMDB_SNAPSHOT_REUSE").ok().as_deref(),
+                            )
+                            .expect("valid snapshot reuse mode");
+                            b.iter_custom(|iters| {
+                                let prepared = supported.map(|v| {
+                                    snapshots::prepare(v, num_keys, selected_mode)
+                                        .expect("prepare validated database")
+                                });
+                                let mut options = options.clone();
+                                let runner = match &prepared {
+                                    Some(p) => {
+                                        options.snapshot_dir = Some(p.scratch.path().to_path_buf());
+                                        println!("{}", p.provenance(&name));
+                                        commonware_runtime::tokio::Runner::new(
+                                            Config::new().with_storage_directory(p.scratch.path()),
+                                        )
+                                    }
+                                    None => {
+                                        commonware_runtime::tokio::Runner::new(Config::default())
+                                    }
+                                };
+                                // The runner and database handles are dropped before scratch cleanup.
+                                let expected_manifest = prepared.as_ref().map(|p| &p.manifest);
+                                let benchmark = &benchmark;
+                                runner.start(|ctx| async move {
                                     dispatch_variant!(
                                         ctx,
                                         variant,
                                         LARGE_PAGE_CACHE_SIZE,
                                         |db, page_cache| {
+                                            if let Some(manifest) = expected_manifest {
+                                                snapshots::check_database(&db, manifest)
+                                                    .expect("snapshot identity");
+                                            }
                                             Box::pin(benchmark.criterion(
                                                 MerkleizeWorkload::new(
                                                     ctx.child("metrics"),
@@ -974,7 +976,7 @@ fn bench_merkleize(c: &mut Criterion) {
                                             .await
                                         }
                                     )
-                                }
+                                })
                             });
                         });
                     }

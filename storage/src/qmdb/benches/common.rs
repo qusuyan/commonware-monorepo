@@ -50,6 +50,10 @@ pub mod artifact_io;
 pub mod cow;
 #[path = "keys.rs"]
 pub mod keys;
+#[path = "merkleize_config.rs"]
+pub mod merkleize_config;
+#[path = "snapshots.rs"]
+pub mod snapshots;
 
 #[allow(dead_code, unused_imports)]
 pub use cow::{ScratchDir, clone_directory};
@@ -766,10 +770,36 @@ pub async fn seed_db<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest
     db: C,
     num_keys: u64,
 ) -> C {
+    let default_keys_path = KeySet::default_path();
+    if default_keys_path.exists() {
+        let keyset = KeySet::load_from_file(&default_keys_path).expect("invalid saved keyset");
+        assert!(
+            num_keys as usize <= keyset.len(),
+            "saved keyset is too small"
+        );
+        return seed_db_with_keys(db, keyset.slice(num_keys as usize)).await;
+    }
+
     let mut rng = TestRng::new(42);
     let mut batch = db.new_batch();
     for i in 0u64..num_keys {
         let k = Sha256::hash(&[&i.to_be_bytes()]);
+        batch = batch.write(k, Some(make_fixed_value(&mut rng)));
+    }
+    let merkleized = batch.merkleize(&db, None).await.unwrap();
+    let (db, _) = db.apply_batch(merkleized).await.unwrap();
+    db.commit().await.unwrap()
+}
+
+/// Pre-populate the database directly with a pre-loaded slice of keys, then commit.
+#[allow(dead_code)]
+pub async fn seed_db_with_keys<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest>>(
+    db: C,
+    keys: &[Digest],
+) -> C {
+    let mut rng = TestRng::new(42);
+    let mut batch = db.new_batch();
+    for &k in keys {
         batch = batch.write(k, Some(make_fixed_value(&mut rng)));
     }
     let merkleized = batch.merkleize(&db, None).await.unwrap();

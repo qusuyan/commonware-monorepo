@@ -23,6 +23,13 @@ csv="$run_dir/summary.csv"
 json="$run_dir/summary.json"
 json_lines="$run_dir/.summary.ndjson"
 
+# Setup records are emitted outside timing and distinguish fresh/reused measurements.
+: > "$run_dir/setup-provenance.ndjson"
+for log in "$run_dir"/*.log; do
+    [ -f "$log" ] || continue
+    jq -Rc 'fromjson? | select(.qmdb_setup == true)' "$log" >> "$run_dir/setup-provenance.ndjson"
+done
+
 printf 'benchmark,auth_mode,index_order,value_layout,merkle_family,bitmap_chunk_bytes,keyspace_keys,write_calls_per_batch,write_type,write_skew_exponent,input_generation_timed,batch_parent,seed_synced,commonware_page_cache,mean_us,mean_ci_low_us,mean_ci_high_us,median_us,mad_us,sample_count\n' > "$csv"
 : > "$json_lines"
 while IFS= read -r estimate; do

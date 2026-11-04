@@ -1,5 +1,9 @@
 # QMDB benchmark guide
 
+Saved-keyset and database setup now uses a validated shared configuration. See
+[snapshot reuse](snapshot-reuse.md) for preparation, required/auto/off behavior,
+supported variants, and interpretation of setup provenance.
+
 This document describes the QMDB benchmark programs currently in this checkout:
 what they prepare, what they time, and how to run them. It is an implementation
 guide, not a record of completed experiments.

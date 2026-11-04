@@ -3,7 +3,7 @@
 set -euo pipefail
 
 if [ "$#" -lt 2 ]; then
-    echo "usage: $0 <run-id> <bench-target> [--updates N] [--skew S] [criterion arguments...]" >&2
+    echo "usage: $0 <run-id> <bench-target> [--updates N] [--skew S] [--keys K] [criterion arguments...]" >&2
     exit 2
 fi
 
@@ -14,13 +14,22 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 unset QMDB_MERKLEIZE_UPDATES
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --updates|--skew)
+        --updates|--skew|--keys)
             if [ "$bench" != "qmdb" ] || [ "$#" -lt 2 ]; then
                 echo "$1 requires the qmdb target and a value" >&2
                 exit 2
             fi
             if [ "$1" = --skew ]; then
                 export QMDB_MERKLEIZE_SKEW="$2"
+            elif [ "$1" = --keys ]; then
+                keys="$2"
+                if [[ ! "$keys" =~ ^[1-9][0-9]*$ ]] ||
+                   [ "${#keys}" -gt 20 ] ||
+                   { [ "${#keys}" -eq 20 ] && [[ "$keys" > "18446744073709551615" ]]; }; then
+                    echo "--keys must be a positive u64" >&2
+                    exit 2
+                fi
+                export QMDB_MERKLEIZE_KEYS="$keys"
             else
                 updates="$2"
                 if [[ ! "$updates" =~ ^[1-9][0-9]*$ ]] ||
@@ -49,6 +58,10 @@ mkdir -p "$run_dir/criterion"
 command=(cargo bench -p commonware-storage --features test-traits --bench "$bench" -- "$@")
 : > "$run_dir/command.txt"
 printf 'CARGO_TARGET_DIR=%q RUSTFLAGS=%q ' "$target_dir" "${RUSTFLAGS:-}" >> "$run_dir/command.txt"
+printf 'QMDB_SNAPSHOT_REUSE=%q ' "${QMDB_SNAPSHOT_REUSE:-required}" >> "$run_dir/command.txt"
+if [ -n "${QMDB_MERKLEIZE_KEYS:-}" ]; then
+    printf 'QMDB_MERKLEIZE_KEYS=%q ' "$QMDB_MERKLEIZE_KEYS" >> "$run_dir/command.txt"
+fi
 if [ -n "${QMDB_MERKLEIZE_UPDATES:-}" ]; then
     printf 'QMDB_MERKLEIZE_UPDATES=%q ' "$QMDB_MERKLEIZE_UPDATES" >> "$run_dir/command.txt"
 fi

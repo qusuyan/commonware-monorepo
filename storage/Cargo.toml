@@ -95,6 +95,12 @@ test-traits = []
 bench = false
 
 [[bench]]
+name = "qmdb_snapshot"
+harness = false
+path = "src/qmdb/benches/snapshot_cli.rs"
+required-features = ["test-traits"]
+
+[[bench]]
 name = "constantinople"
 harness = false
 path = "src/qmdb/benches/constantinople.rs"
