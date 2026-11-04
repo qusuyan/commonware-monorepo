@@ -117,6 +117,26 @@ type CurUVar32Mmb = commonware_storage::qmdb::current::unordered::variable::Db<
     CHUNK_SIZE,
     Rayon,
 >;
+type CurUFixBTree32 = commonware_storage::qmdb::current::unordered::fixed::BTreeDb<
+    commonware_storage::merkle::mmr::Family,
+    Context,
+    Digest,
+    Digest,
+    Sha256,
+    EightCap,
+    CHUNK_SIZE,
+    Rayon,
+>;
+type CurUFixBTree32Mmb = commonware_storage::qmdb::current::unordered::fixed::BTreeDb<
+    commonware_storage::merkle::mmb::Family,
+    Context,
+    Digest,
+    Digest,
+    Sha256,
+    EightCap,
+    CHUNK_SIZE,
+    Rayon,
+>;
 
 const LARGE_CHUNK_SIZE: usize = 256;
 
@@ -757,6 +777,14 @@ variants! {
     CurrentFixed32Mmb {
         name: "current::unordered::fixed::mmb chunk=32",
         init: |ctx, page_cache| CurUFix32Mmb::init(ctx.child("storage"), cur_fix_cfg_with_cache(ctx, page_cache)),
+    }
+    CurrentUnorderedBTreeFixed32 {
+        name: "current::unordered_btree::fixed::mmr chunk=32",
+        init: |ctx, page_cache| CurUFixBTree32::init(ctx.child("storage"), cur_fix_cfg_with_cache(ctx, page_cache)),
+    }
+    CurrentUnorderedBTreeFixed32Mmb {
+        name: "current::unordered_btree::fixed::mmb chunk=32",
+        init: |ctx, page_cache| CurUFixBTree32Mmb::init(ctx.child("storage"), cur_fix_cfg_with_cache(ctx, page_cache)),
     }
     CurrentVariable32Mmb {
         name: "current::unordered::variable::mmb chunk=32",

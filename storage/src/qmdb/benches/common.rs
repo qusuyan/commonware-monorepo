@@ -26,7 +26,10 @@ use commonware_storage::{
         current::{
             FixedConfig as CurrentFixedConfig, VariableConfig as CurrentVariableConfig,
             ordered::{fixed::Db as OCFixed, variable::Db as OCVariable},
-            unordered::{fixed::Db as UCFixed, variable::Db as UCVariable},
+            unordered::{
+                fixed::{BTreeDb as UCBTreeFixed, Db as UCFixed},
+                variable::Db as UCVariable,
+            },
         },
         immutable::fixed::{Config as ImmutableFixedConfig, Db as IFixed},
         keyless::variable::{Config as KeylessConfig, Db as Keyless},
@@ -72,6 +75,8 @@ pub type AnyOFixP3Db<F> = OFixPart<F, Context, Digest, Digest, Sha256, EightCap,
 #[allow(dead_code)]
 pub type AnyUFixP64kDb<F> = UFixPart<F, Context, Digest, Digest, Sha256, EightCap, 2, Rayon>;
 pub type CurUFixDb<F> = UCFixed<F, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE, Rayon>;
+pub type CurUFixBTreeDb<F> =
+    UCBTreeFixed<F, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE, Rayon>;
 pub type CurOFixDb<F> = OCFixed<F, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE, Rayon>;
 
 // -- Fixed value (Digest), variable storage layout --
@@ -488,6 +493,18 @@ macro_rules! define_fixed_variants {
                     entry: CurrentUnorderedFixedMmb,
                     name: "current::unordered::fixed::mmb",
                     db: $crate::common::CurUFixDb<commonware_storage::merkle::mmb::Family>,
+                    cfg: $crate::common::cur_fix_cfg,
+                }
+                {
+                    entry: CurrentUnorderedBTreeFixedMmr,
+                    name: "current::unordered_btree::fixed::mmr",
+                    db: $crate::common::CurUFixBTreeDb<commonware_storage::merkle::mmr::Family>,
+                    cfg: $crate::common::cur_fix_cfg,
+                }
+                {
+                    entry: CurrentUnorderedBTreeFixedMmb,
+                    name: "current::unordered_btree::fixed::mmb",
+                    db: $crate::common::CurUFixBTreeDb<commonware_storage::merkle::mmb::Family>,
                     cfg: $crate::common::cur_fix_cfg,
                 }
                 {
