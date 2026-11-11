@@ -92,7 +92,9 @@ async fn run(context: Context, options: BenchOptions) -> Digest {
 #[bench::any_unordered_fixed_mmr(args = (ANY_UNORDERED_FIXED_MMR))]
 #[bench::current_ordered_fixed_mmb_chunk_256(args = (CURRENT_ORDERED_FIXED_MMB_CHUNK_256))]
 fn bench_merkleize(options: BenchOptions) -> Digest {
-    Runner::new(Config::default()).start(|context| run(context, options))
+    // Keep periodic CPU polling out of the instruction-count regression baseline.
+    Runner::new(Config::default().with_process_cpu_monitoring(false))
+        .start(|context| run(context, options))
 }
 
 library_benchmark_group!(
