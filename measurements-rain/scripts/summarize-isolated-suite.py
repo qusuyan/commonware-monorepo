@@ -12,11 +12,14 @@ import statistics
 MODES = ("any_unordered", "current_unordered", "current_ordered")
 SIZES = (200, 500, 1000, 1500, 2000, 5000, 7000, 8000, 10000)
 PAIRWISE_MODES = ("any_unordered", "current_ordered")
+BTREE_MODES = ("any_unordered_btree", "current_ordered")
 
 
 def report_modes(report):
     configs = set(report["configurations"])
-    if report["experiment"] == "write-type" and configs == set(PAIRWISE_MODES):
+    if configs == set(BTREE_MODES):
+        return BTREE_MODES
+    if configs == set(PAIRWISE_MODES):
         return PAIRWISE_MODES
     if configs == set(MODES):
         return MODES
@@ -26,17 +29,17 @@ def report_modes(report):
 def report_write_types(report):
     if report["experiment"] != "write-type":
         return ("overwrite",)
-    return (("overwrite", "insert", "delete") if report_modes(report) == PAIRWISE_MODES
+    return (("overwrite", "insert", "delete") if len(report_modes(report)) == 2
             else ("overwrite", "insert"))
 
 
 def summarize(suite, aspects=None, json_output=None):
     root = Path(__file__).resolve().parents[1]
     log = (suite / "suite.log").read_text()
-    paths = re.findall(r"Archived (?:configuration group|write-type comparison|skew sweep) at (.+)", log)
+    paths = re.findall(r"Archived (?:configuration group|write-type comparison|skew sweep|database scale sweep) at (.+)", log)
     if len(paths) != len(set(paths)):
         raise ValueError("duplicate archived groups in suite log")
-    reports = {"writesize": [], "write-type": [], "skew": []}
+    reports = {"writesize": [], "write-type": [], "skew": [], "db-scale": []}
     for folder in map(Path, paths):
         folder = folder.resolve()
         if not folder.is_relative_to(root / "results"):
@@ -48,16 +51,25 @@ def summarize(suite, aspects=None, json_output=None):
             kind = report["experiment"]
             if report["schema_version"] != 2:
                 raise ValueError(f"invalid configurations: {path}")
+            operation = report.get("operation", "merkleize")
+            scope = "apply_batch" if operation == "apply_study" else "batch_creation_staging_merkleization_root"
+            durability = "buffered" if operation == "apply_study" else "speculative"
+            if operation not in ("merkleize", "apply_study") or report.get("timing_scope", scope) != scope or report.get("durability", durability) != durability:
+                raise ValueError(f"invalid timing boundary: {path}")
             modes = report_modes(report)
             for mode in modes:
                 cases = ([report["configurations"][mode][t] for t in report_write_types(report)]
                          if kind == "write-type" else [report["configurations"][mode]])
                 for case in cases:
-                    if (int(case["keyspace_keys"]) != 10_000_000
+                    if (case.get("operation", "merkleize") != operation
+                            or case.get("timing_scope", scope) != scope
+                            or case.get("durability", durability) != durability
+                            or (operation == "apply_study" and case.get("iteration_policy") != "independent_snapshot_fixed_inputs")
+                            or int(case["keyspace_keys"]) != report["keyspace_keys"]
                             or case["auth_mode"] + "_" + case["index_order"] != mode
                             or case["input_generation_timed"] is not False
                             or case["value_layout"] != "fixed" or case["merkle_family"] != "mmb"
-                            or case["bitmap_chunk_bytes"] != ("" if mode == MODES[0] else "32")
+                            or case["bitmap_chunk_bytes"] != ("" if mode.startswith("any_") else "32")
                             or case["seed_synced"] != "yes"
                             or case["commonware_page_cache"] != "retained (warm)"
                             or case["batch_parent"] != "directly from database"
@@ -68,20 +80,38 @@ def summarize(suite, aspects=None, json_output=None):
                         raise ValueError(f"mismatched workload: {path}")
             reports[kind].append((path, report))
 
-    expected = {"writesize": {(n, 0) for n in SIZES},
-                "write-type": {(10000, 0)}, "skew": {(10000, s) for s in (0, .5, 1, 1.5, 2)}}
+    operations = {r.get("operation", "merkleize") for entries in reports.values() for _, r in entries}
+    if len(operations) > 1:
+        raise ValueError("cannot mix operations across suite reports")
     outputs = {}
-    selected = set(aspects) if aspects else set(reports)
+    selected = set(aspects) if aspects else {kind for kind, entries in reports.items() if entries}
+    if not selected:
+        raise ValueError("no completed experiment reports")
     for kind, entries in reports.items():
         if kind not in selected:
             continue
         groups = {}
         for path, report in entries:
-            groups.setdefault((report["write_calls_per_batch"], report["write_skew_exponent"]), []).append((path, report))
-        if set(groups) != expected[kind]:
+            groups.setdefault((report["keyspace_keys"], report["write_calls_per_batch"], report["write_skew_exponent"]), []).append((path, report))
+        key_counts = {keys for keys, _, _ in groups}
+        if kind == "db-scale":
+            if key_counts != {1_000_000, 2_000_000, 4_000_000, 10_000_000}:
+                raise ValueError("missing or unexpected database scale points")
+        elif len(key_counts) != 1:
+            raise ValueError("cannot mix baseline key counts")
+        counts = {count for _, count, _ in groups}
+        if kind == "writesize":
+            expected = {(n, 0) for n in SIZES}
+        else:
+            if len(counts) != 1:
+                raise ValueError("cannot mix write counts within a fixed-size sweep")
+            count = next(iter(counts))
+            expected = ({(count, s) for s in (0, .5, 1, 1.5, 2)}
+                        if kind == "skew" else {(count, 0)})
+        if {(count, skew) for _, count, skew in groups} != expected:
             raise ValueError(f"missing or unexpected workload points: {kind}")
         rows = []
-        for (count, skew), runs in sorted(groups.items()):
+        for (keys, count, skew), runs in sorted(groups.items()):
             if len(runs) != 3 or {r["repeat"] for _, r in runs} != {1, 2, 3}:
                 raise ValueError(f"missing or duplicate process repeats: {kind} {count} {skew}")
             modes = report_modes(runs[0][1])
@@ -89,9 +119,11 @@ def summarize(suite, aspects=None, json_output=None):
             if any(report_modes(r) != modes or report_write_types(r) != write_types for _, r in runs):
                 raise ValueError("cannot mix configuration/workload sets across repeats")
             for write_type in write_types:
-                row = dict(keyspace_keys=10_000_000, write_calls_per_batch=count,
+                row = dict(keyspace_keys=keys, write_calls_per_batch=count,
                            write_type=write_type, write_skew_exponent=skew, process_repeats=3,
-                           timing_scope="batch_creation_staging_merkleization_root",
+                           operation=runs[0][1].get("operation", "merkleize"),
+                           timing_scope=runs[0][1].get("timing_scope", "batch_creation_staging_merkleization_root"),
+                           durability=runs[0][1].get("durability", "speculative"),
                            source_comparisons=";".join(str(p) for p, _ in runs))
 
                 def add_stats(name, values):
@@ -125,7 +157,7 @@ def summarize(suite, aspects=None, json_output=None):
 
     # Validate every selected aspect before publishing. Existing archives are never modified.
     for kind, rows in outputs.items():
-        folder = root / "results" / (kind.replace("-", "") + "-summary-20261030")
+        folder = root / "results" / (kind.replace("-", "") + "-" + rows[0]["operation"] + "-summary")
         folder.mkdir(exist_ok=True)
         destination = folder / "summary.csv"
         temporary = folder / "summary.csv.tmp"
@@ -140,7 +172,7 @@ def summarize(suite, aspects=None, json_output=None):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("suite_dir", type=Path)
-    parser.add_argument("--aspects", nargs="+", choices=("writesize", "write-type", "skew"))
+    parser.add_argument("--aspects", nargs="+", choices=("writesize", "write-type", "skew", "db-scale"))
     parser.add_argument("--json-output", type=Path, help="write intermediate rows instead of CSVs")
     args = parser.parse_args()
     summarize(args.suite_dir.resolve(), args.aspects, args.json_output)

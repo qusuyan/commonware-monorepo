@@ -30,8 +30,8 @@ signals a deliberately cleared Commonware page cache.
 For a fixed-count merkleize run, `u=N` records N write calls per batch. Legacy
 names omit `u` and use 10% of the seeded key count.
 The main merkleize names use `v` for the variant and `k` for the seeded key
-count. The current write-size implementation performs uniform random overwrites;
-it does not add write-type or skew parameters to benchmark names.
+count. The write-size runner uses uniform random overwrites. Explicit write-type and
+skew selections add `w=<type>` and `zipf=<exponent>` to benchmark names.
 
 `any` and `current` are representations, not generic modes. `any`
 authenticates the operation log and keeps its activity bitmap local. `current`
@@ -50,19 +50,30 @@ cargo bench -p commonware-storage --features test-traits --bench qmdb
 ### `merkleize.rs`: speculative batch merkleization
 
 Setup opens and seeds a database, and may sync it or clear the page cache.
-Chained cases also prepare a pending parent before each timed iteration. These
-preparations are excluded from timing. One timed iteration:
+Chained cases also prepare a pending parent before each timed iteration. After
+parent preparation, each iteration samples keys and generates key/value pairs
+into a reusable input buffer. All of these preparations are excluded from both
+Criterion timing and Gungraun collection. One timed iteration:
 
-1. Creates a child batch.
-2. Stages uniform random overwrites: a fixed N write calls when configured,
+1. Creates a fresh batch or a child of the prepared parent.
+2. Stages the prepared writes: a fixed N write calls when configured,
    otherwise 10% of the seeded key count.
 3. Calls `merkleize()`.
 4. Retrieves the resulting root.
 
 It does **not** apply, commit, or sync the measured batch. Each iteration works
 against the same seeded database, so this is speculative write-path latency,
-not durable write latency. Random selection, key hashing, value generation,
-batch writes, merkleization, and root retrieval are all inside timing.
+not durable write latency. Random selection, benchmark key hashing, value
+generation, and input-buffer allocation are outside timing; batch creation,
+batch writes, merkleization, and root retrieval are inside. Database-internal
+copying, encoding, and hashing remain measured. Inputs preserve write order and
+duplicates, and only one batch of inputs is buffered at a time. The churned
+benchmark uses the same boundary after its untimed churn setup.
+
+Historical results collected before this timer-boundary revision include input
+generation. Benchmark names are unchanged, so keep those archives separate and
+record the code revision when comparing results. Rerun baselines for comparisons
+with the revised boundary; old and new timings/counters are not directly comparable.
 
 Set `QMDB_MERKLEIZE_UPDATES=N` for a direct Cargo invocation. The Rust benchmark
 requires a positive `u64`; zero, malformed values, and overflow are rejected.
@@ -90,11 +101,14 @@ measurements-rain/scripts/run-criterion.sh fixed-any-10k qmdb --updates 1000 -- 
   --exact 'qmdb::merkleize/v=any::unordered::fixed::mmb k=10000 u=1000 ch=false s=true cc=false'
 ```
 
-The current Rust implementation does not consume `QMDB_MERKLEIZE_SKEW` or
-`QMDB_MERKLEIZE_WRITE_TYPE`. Although the local wrapper accepts `--skew` and
-preserves these environment settings, they do not select skewed, insert, or mixed
-workloads on this branch. Leave both variables unset for write-size experiments;
-the metadata helpers can otherwise record requested settings that Rust ignores.
+The Rust benchmark consumes `QMDB_MERKLEIZE_SKEW` (finite, non-negative)
+and `QMDB_MERKLEIZE_WRITE_TYPE` (`overwrite`, `insert`, `delete`, or `mixed`). The
+wrapper accepts `--skew`; dedicated runners select the intended workload.
+Write-size runs clear both variables to preserve uniform overwrites.
+The actual write-type experiment runs overwrite, insert, and delete separately:
+each batch contains 100% of its selected operation type. Mixed writes are excluded
+from that experiment; the mixed case in the snapshot validation archive was a
+correctness check only.
 
 `cc=true` clears only Commonware's page cache after seed synchronization, once
 per Criterion group of iterations. Later iterations may warm that cache. It does
@@ -120,6 +134,15 @@ cargo bench -p commonware-storage --features test-traits --bench qmdb -- qmdb::m
 RUSTFLAGS='--cfg full_bench' cargo bench -p commonware-storage --features test-traits --bench qmdb -- qmdb::merkleize
 RUSTFLAGS='--cfg huge_bench' cargo bench -p commonware-storage --features test-traits --bench qmdb -- 'current::unordered::fixed::mmr chunk=32'
 ```
+
+### `apply_study.rs`: study-specific batch application
+
+The new apply-only study compares Any unordered B-Tree with Current ordered,
+using shared Merkleize configuration and validated independent scratch snapshots.
+Only application is timed; preparation and Merkleization precede timing and no
+commit or sync follows application. Select `QMDB_STUDY_OPERATION=apply` with the
+write-size, write-type, skew and database-scale runners. Defaults continue to run
+Merkleize. See [apply study instructions](experiments/apply/README.md).
 
 ### `apply_batch.rs`: installing authenticated batches
 
@@ -243,6 +266,67 @@ This launches `just benchmark-tracking generate`, writes a run manifest, and
 copies `benchmark-tracking-results/` to
 `measurements-rain/results/<run-id>/callgrind/`.
 
+### `qmdb_cpu`: native CPU accounting
+
+This standalone Rust executable measures native process CPU consumption with
+`libc::getrusage(RUSAGE_SELF)` and elapsed time with `Instant`. It runs separately
+from Criterion and Callgrind. CPU accounting includes all process threads and
+runtime housekeeping, but excludes child processes.
+
+Select one phase and one matched B-tree/MMB variant per process:
+
+```bash
+# Prepare validated masters first, using the same key count as the CPU run.
+measurements-rain/scripts/seed-db.sh --variant any_unordered_btree --count 4000000
+measurements-rain/scripts/seed-db.sh --variant current_ordered --count 4000000
+
+measurements-rain/scripts/run-cpu-telemetry.sh cpu-any-merkleize \
+  --phase merkleize --variant any_unordered_btree --keys 4000000 --updates 10000
+measurements-rain/scripts/run-cpu-telemetry.sh cpu-current-apply \
+  --phase apply --variant current_ordered --keys 4000000 --updates 10000
+```
+
+Required options are `--phase`, `--variant`, `--keys`, and `--updates`.
+Optional settings are `--samples` (10), `--write-type` (overwrite, insert, delete,
+or mixed; default overwrite), and `--skew` (default 0). Inputs use RNG seed 99.
+The script manages `--output`; when invoking `qmdb_cpu` directly, supply a new
+output directory. `QMDB_SNAPSHOT_REUSE` defaults to `required`; `off` allows small
+fresh-seed smoke runs without modifying saved masters.
+
+Each sample opens an independent scratch seed and submits one batch. Merkleize
+measures batch creation, staging precomputed writes, merkleization, root retrieval,
+and speculative batch disposal. Apply prepares and merkleizes outside accounting,
+then measures only application. Root validation, database cleanup and output
+serialization are excluded. Neither phase commits or syncs its measured batch.
+Commonware caches are retained after preparation; the OS page cache is not cleared.
+Both cases use MMB, the same ordered index implementation, and eight strategy
+threads; Current ordered uses 32-byte chunks. Differences represent combined
+Current ordered semantics, not an isolated cryptographic cost.
+
+The run directory contains `manifest.json`, `command.txt`, `output.log`, and a
+`cpu/` directory with `configuration.json`, `samples.jsonl`, `overhead.jsonl`, and
+`summary.json`. Existing destinations are rejected, including partial prior runs.
+Raw samples include wall/user/kernel CPU nanoseconds, context switches, page
+faults, snapshot provenance and workload settings. Summaries report mean, median,
+and sample standard deviation (null for one sample), plus CPU cost per batch/write
+attempt, average cores, and CPU percentage. Duplicate keys remain write attempts.
+
+Nanosecond units do not imply nanosecond resolution. Zero CPU deltas are preserved
+and flagged; samples within 10 times their paired empty-window CPU overhead are
+also flagged. Empty-window overhead is recorded, never subtracted. Increase work
+per batch when precision is insufficient. Native results do not participate in
+Callgrind regression gates. Linux and macOS are supported; validation status is
+recorded in [PROP-07](proposals/proposed/07-cpu-metrics-and-profiling.md).
+
+The runtime also exposes `runtime_process_cpu_usage_basis_points` through its
+existing `sysinfo` sampler after two CPU refreshes, at the existing 10-second
+cadence. Divide by 100 for percent or by 10,000 for average cores; values above
+10,000 are valid. Fractional utilization is rounded to the nearest basis point.
+Unavailable readings remove the gauge until re-primed. Disable CPU monitoring
+with `tokio::Config::with_process_cpu_monitoring(false)`; memory sampling remains
+enabled. The native runner and existing Gungraun runner do this automatically, keeping
+CPU polling out of their measured intervals.
+
 ## Reproducible result capture
 
 `run-criterion.sh` is a wrapper around `cargo bench`. It prepares output paths,
@@ -276,7 +360,7 @@ the original 10% workload in the main merkleize cases. Select those cases with
 cases, which ignore the fixed-count setting.
 
 ```bash
-# This branch does not implement skew or write-type overrides.
+# Keep write-size runs uniform overwrites.
 unset QMDB_MERKLEIZE_SKEW QMDB_MERKLEIZE_WRITE_TYPE
 
 # Archive the main merkleize matrix at the default 10K-key tier and 10% count.
@@ -323,9 +407,57 @@ this wrapper. Fixed-count invocations append `-uN` to that helper's run ID and
 exclude churned cases. It is not required for the commands above. Callgrind
 capture uses the separate `run-callgrind.sh` script described earlier.
 
+For the active controlled measurement pair, run the reduced end-to-end sweep
+when the full matrix is too expensive:
+
+```bash
+measurements-rain/scripts/run-focused-matrix.sh 3
+```
+
+It runs the 2K anchor, overwrite/insert/delete, Zipf 0 and 2, and 1M/10M
+database endpoints using `any_unordered_btree` versus `current_ordered`.
+
 ## Interpreting output
 
 Criterion measures only the timed regions described above. Callgrind reports
 simulated CPU counters, not elapsed time. Keep results from different CPU
 models separate, record cache and background-load conditions, and use
 independent process runs before making broad performance claims.
+
+## Active configuration comparisons
+
+All active dedicated repeats run `any_unordered_btree` and `current_ordered`.
+Both use fixed 32-byte keys and values, MMB, the same nonpartitioned ordered
+B-Tree index type, direct batches, a synced seed, and retained Commonware cache.
+Current uses 32-byte chunks. Configuration order alternates across repeats.
+
+Their comparison JSON uses `schema_version: 2`, explicit configuration IDs under
+`configurations`, and `current_ordered_minus_any_unordered_btree` under
+`comparisons`.
+
+Each comparison records `delta_mean_us` and `overhead_percent`, relative to the
+baseline named after `_minus_`. Differences are descriptive, not
+confidence intervals for paired differences. Absolute observations retain
+Criterion means, confidence intervals, and sample counts.
+
+Write-type repeats use the same pair across pure overwrite, insert, and delete
+batches. The pair controls the index implementation, but its difference still
+contains the Current record and authentication design, not an isolated bitmap cost.
+
+Timing includes batch creation, prepared-write staging, speculative
+Merkleization, and root retrieval; input generation is excluded. Historical
+runs before the timer-boundary revision include input generation. The measured batch is discarded: these experiments measure
+maintaining proof-supporting structures, not proof generation, verification,
+durable writes, or total authentication overhead. Any retains its authenticated
+operation log and local bitmap. Ordering differences include all ordered-design
+work, not exclusively exclusion-proof hashing.
+
+The active dedicated workload runs use 4M seeded keys (`k=4000000`), with 200, 500,
+1K, 1.5K, 2K, 5K, 7K, 8K, or 10K write calls for the write-size sweep. The
+write-type sweep uses 2K write calls. Skew uses 2K writes for the full study and
+configurable exponents at fixed 4M keys, with a 10K-key smoke mode. The dedicated
+database scaling sweep evaluates 1M, 2M, 4M, and 10M keys at 2K writes.
+Arbitrary key counts can be selected at runtime via `QMDB_MERKLEIZE_KEYS`. See their READMEs for
+commands. Writesize plots and aggregation accept the active pair and legacy
+configuration sets, but a single aggregate cannot mix them. No Rust benchmark timing changes are
+required to select Current + ordered.
