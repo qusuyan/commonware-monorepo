@@ -1,4 +1,4 @@
-# Proposal 06: Overwrite, Insert, and Delete: `any+unordered` vs. `current+ordered`
+# Proposal 06: Overwrite, Insert, and Delete on the controlled B-Tree pair
 
 - **Proposal ID:** PROP-06
 - **Status:** Implemented / Ready for Review
@@ -20,14 +20,13 @@ The primary research goal of our project is to quantify the **combined current-s
 
 > **What is the true performance cost of full authentication (current-state inclusion proofs via bitmap grafting + negative exclusion proofs via ordered predecessor chains) compared to an authenticated operation-log baseline?**
 
-Compare the standard `any::unordered::fixed::mmb` baseline with
-`current::ordered::fixed::mmb chunk=32`. The Any variant uses the standard
-unordered index; Current ordered uses a B-Tree index. Both retain an authenticated
-operation log. Current additionally supports authenticated current state and
-ordered exclusion proofs.
+The implemented runner compares `any::unordered_btree::fixed::mmb` with
+`current::ordered::fixed::mmb chunk=32`. Both use the same nonpartitioned
+ordered B-Tree index type and retain an authenticated operation log. Current
+additionally supports authenticated current state and ordered exclusion proofs.
 
-This comparison measures combined design overhead, including the index difference,
-predecessor searches, ordered-record sizes, operation-log amplification, bitmap
+This comparison measures combined design overhead after controlling the index
+type, including predecessor searches, ordered-record sizes, operation-log amplification, bitmap
 overlays, and Merkle grafting. It cannot isolate cryptographic hashing alone.
 
 ---
@@ -58,7 +57,7 @@ speculative staging and Merkleization without apply or commit.
 ## 3. Attribution and Research Hypotheses
 
 For each workload, report the mean latency of `current+ordered` minus the mean
-latency of `any+unordered`, plus the percentage relative to the latter.
+latency of `any+unordered_btree`, plus the percentage relative to the latter.
 These are descriptive differences, not confidence intervals for paired batches.
 Criterion may choose different iteration counts for each engine.
 
@@ -167,14 +166,14 @@ but the write-type runner selects standard Any unordered.
    ```bash
    experiment_modes_pairwise() {
        case $(( ($1 - 1) % 2 )) in
-           0) modes=(any_unordered current_ordered) ;;
-           1) modes=(current_ordered any_unordered) ;;
+           0) modes=(any_unordered_btree current_ordered) ;;
+           1) modes=(current_ordered any_unordered_btree) ;;
        esac
    }
 
    experiment_variant() {
        case "$1" in
-           any_unordered) variant="any::unordered::fixed::mmb" ;;
+           any_unordered_btree) variant="any::unordered_btree::fixed::mmb" ;;
            current_ordered)     variant="current::ordered::fixed::mmb chunk=32" ;;
            *) echo "unknown configuration: $1" >&2; return 1 ;;
        esac
@@ -182,17 +181,17 @@ but the write-type runner selects standard Any unordered.
    ```
 
 2. **Runner Extension (`measurements-rain/experiments/write-type/run.sh`):**
-   - Sweeps 2 configurations (`any_unordered` and `current_ordered`) across 3 pure workloads (`overwrite`, `insert`, `delete`).
+   - Sweeps 2 configurations (`any_unordered_btree` and `current_ordered`) across 3 pure workloads (`overwrite`, `insert`, `delete`).
    - Total rows per repeat: $2 \text{ configurations} \times 3 \text{ write types} = 6 \text{ rows}$.
 
 3. **Schema & Comparison (`measurements-rain/scripts/compare-experiment.jq`):**
-   - Parse both standard `unordered` results and historical `unordered_btree` results.
-   - Use `any_unordered` as the baseline for the standard runner.
+   - Parse the active B-Tree pair and retain compatibility with historical standard-unordered results.
+   - Use `any_unordered_btree` as the active baseline.
    - Output pairwise comparison for each write type:
      ```jq
-     current_ordered_minus_any_unordered: {
-         delta_mean_us: ($ordered.mean_us - $any_unordered.mean_us),
-         overhead_percent: (100 * ($ordered.mean_us / $any_unordered.mean_us - 1))
+     current_ordered_minus_any_unordered_btree: {
+         delta_mean_us: ($ordered.mean_us - $any_unordered_btree.mean_us),
+         overhead_percent: (100 * ($ordered.mean_us / $any_unordered_btree.mean_us - 1))
      }
      ```
 
@@ -216,10 +215,10 @@ but the write-type runner selects standard Any unordered.
      2. Committed keys return `None`: `db.get(deleted_key) == None`.
      3. Untouched keys remain readable: `db.get(surviving_key) == Some(val)`.
      4. The active key count decreases by the number of distinct deleted keys, which can be less than 20. Check all survivor values and verify that discarding a speculative batch leaves the seed unchanged.
-   - Exercise all three workloads on both measured variants: `any::unordered` and `current::ordered` with MMB.
+   - Exercise all three workloads on both measured variants: `any::unordered_btree` and `current::ordered` with MMB.
 
 3. **Small-Scale Smoke Benchmark:**
-   - Run Criterion smoke tests ($K = 10\text{K}, U = 100$) across `any::unordered::fixed::mmb` and `current::ordered::fixed::mmb chunk=32` for `overwrite`, `insert`, and `delete`.
+   - Run Criterion smoke tests ($K = 10\text{K}, U = 100$) across `any::unordered_btree::fixed::mmb` and `current::ordered::fixed::mmb chunk=32` for `overwrite`, `insert`, and `delete`.
    - Confirm zero panics, valid Criterion output, and accurate JSON parsing.
 
 4. **Pipeline Test:**

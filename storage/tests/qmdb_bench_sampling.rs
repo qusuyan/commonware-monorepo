@@ -72,7 +72,12 @@ fn parses_arbitrary_exponents_and_rejects_invalid_inputs() {
 #[test]
 fn zero_preserves_uniform_keys_values_and_rng_consumption() {
     let sampler = WriteSampler::new(100, 0.0).unwrap();
-    for write_type in [WriteType::Overwrite, WriteType::Insert, WriteType::Mixed] {
+    for write_type in [
+        WriteType::Overwrite,
+        WriteType::Insert,
+        WriteType::Delete,
+        WriteType::Mixed,
+    ] {
         let mut original_rng = TestRng::new(99);
         let mut sampled_rng = TestRng::new(99);
         let original =
@@ -155,7 +160,12 @@ fn sampled_writes_respect_write_type_ranges_and_call_count() {
     let new = keys(32);
     for exponent in [0.0, 0.75, 3.0] {
         let sampler = WriteSampler::new(32, exponent).unwrap();
-        for write_type in [WriteType::Overwrite, WriteType::Insert, WriteType::Mixed] {
+        for write_type in [
+            WriteType::Overwrite,
+            WriteType::Insert,
+            WriteType::Delete,
+            WriteType::Mixed,
+        ] {
             let mut rng = TestRng::new(99);
             let writes =
                 write_sampled_writes(Writes::default(), 1_000, &mut rng, write_type, &sampler);
@@ -163,7 +173,7 @@ fn sampled_writes_respect_write_type_ranges_and_call_count() {
             let mut overwrites = 0;
             let mut inserts = 0;
             for (key, value) in writes.0 {
-                assert!(value.is_some());
+                assert_eq!(value.is_none(), write_type == WriteType::Delete);
                 if seeded.contains(&key) {
                     overwrites += 1;
                 } else if new.contains(&key) {
@@ -173,7 +183,7 @@ fn sampled_writes_respect_write_type_ranges_and_call_count() {
                 }
             }
             match write_type {
-                WriteType::Overwrite => assert_eq!(overwrites, 1_000),
+                WriteType::Overwrite | WriteType::Delete => assert_eq!(overwrites, 1_000),
                 WriteType::Insert => assert_eq!(inserts, 1_000),
                 WriteType::Mixed => assert!(overwrites > 0 && inserts > 0),
             }
