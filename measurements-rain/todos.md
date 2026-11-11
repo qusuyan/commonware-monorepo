@@ -4,6 +4,20 @@ A consolidated roadmap of pending tasks, architectural implementations, and scie
 
 ---
 
+## 🔒 Non-Negotiable Constraint: Log Integrity via Merkle Tree is Required
+
+> [!IMPORTANT]
+> **QMDB Integrity Invariant**
+> Maintaining **cryptographic log integrity** via Merkle Mountain Ranges or Belts (MMR/MMB) over the append-only operation log is a mandatory, core requirement of QMDB. We are **not** proposing to remove the log's Merkle tree or deploy an unauthenticated store.
+>
+> - **The True Production Baseline is `any::unordered` (specifically `any::unordered_btree`):** It guarantees full cryptographic log integrity, historical state roots, and tamper-evident auditing.
+> - **What We Are Investigating:** Strictly whether to keep or drop:
+>   1. Current-state inclusion proofs via activity bitmap grafting (`current::unordered`).
+>   2. Exclusion / non-membership proofs via ordered indexer and predecessor links (`current::ordered`).
+> - **Role of `store`:** Raw `store` is strictly an academic hardware-limit reference, NOT an acceptable production configuration for QMDB because dropping log Merkleization breaks tamper-evidence and consensus state commitment.
+
+---
+
 ## 🚨 Critical Control Variable: Standardizing on the B-Tree Indexer
 
 > [!IMPORTANT]
@@ -27,6 +41,48 @@ A consolidated roadmap of pending tasks, architectural implementations, and scie
 
 ## ⚡ Active & Prioritized Tasks
 
+### Priority 0: In-Depth Latency Breakdown for Insert vs. Overwrite (Abnormal Insert Latency Investigation)
+
+> [!IMPORTANT]
+> **Observation & Motivation**
+> In our write-type benchmark measurements ($K = 4\text{M}$ keys, $u = 2,000$ operations), `any::unordered_btree` demonstrated an abnormally fast latency for **insert** ($1.15\text{ ms}$) compared to **overwrite** ($9.90\text{ ms}$) and **delete** ($8.03\text{ ms}$) — an ~8.6x speedup.
+> In contrast, `current::ordered` insert latency remained high ($11.96\text{ ms}$ vs $13.68\text{ ms}$ overwrite, only 12.6% faster).
+>
+> Following mentor discussion, we are conducting an in-depth internal latency breakdown to instrument, isolate, and quantify the micro-stages driving this performance gap.
+
+#### Identified Root Causes in QMDB Architecture
+1. **Zero Journal Reads on Insert (`gather_existing_locations`):**
+   - For `any::unordered_btree` inserts, none of the keys exist in the snapshot (`db.snapshot.get(key)` returns `None`).
+   - Consequently, `gather_existing_locations` produces an empty list and skips `read_ops` completely (0 scattered log reads vs 2,000 scattered disk/cache reads for overwrites).
+2. **Compaction Floor Scan Bypass & `user_steps` Anomaly (`any/batch.rs`):**
+   - In `merkleize_with_floor_scan`, `total_steps = user_steps + 1`.
+   - `user_steps += 1` is incremented inside `emit()` when resolving existing keys (overwrites/deletes).
+   - In the `creates` loop (lines 2145–2170), `user_steps` is **NOT incremented**! Thus, `user_steps = 0` and `total_steps = 1` regardless of batch size ($u = 2,000$).
+   - As a result, the compaction floor only advances **1 single step** instead of scanning, reading, and moving 2,001 active operations from the bottom of the log to the tip. This cuts the resulting Merkle tree size roughly in half (~2,001 leaves for insert vs ~4,001 leaves for overwrite).
+3. **Bitmap Invalidation & Predecessor Rewriting in `current::ordered`:**
+   - In `current::ordered`, every insert must execute `find_prev_key` in the ordered index and append an updated predecessor entry ($E'_p$) pointing `next_key` to $K$.
+   - This invalidates $E_p$'s old location, flipping bits to 0 in historical activity chunks, dirtying historical chunks, and forcing full upper-tree Merkle grafting.
+
+#### Planned Action Items
+- [ ] **Stage-Level Micro-Instrumentation in `merkleize`:**
+  - Instrument high-resolution nanosecond timers (`std::time::Instant` or lightweight trace spans) across 4 discrete stages in `merkleize()`:
+    - **Stage 1 (Snapshot Resolution):** Key lookups in index / snapshot (`gather_existing_locations` / `find_prev_key`).
+    - **Stage 2 (Historical Journal I/O):** Reading and deserializing historical operations from log (`read_ops`).
+    - **Stage 3 (Compaction & Floor Raising):** Inactivity floor scan, classification, and moving active entries to tip.
+    - **Stage 4 (Merkle Tree Construction & Hashing):** Building Merkle trees, activity bitmap chunk overlays, grafting, and computing state roots.
+- [ ] **Breakdown Benchmark Harness & Data Collection:**
+  - Create micro-benchmark harness or runner script to export granular sub-stage latencies (mean, p50, p99) for:
+    - `any::unordered_btree` (Insert vs. Overwrite vs. Delete)
+    - `current::ordered` (Insert vs. Overwrite vs. Delete)
+    - `current::unordered_btree` (Control variant)
+- [ ] **Upstream Design Clarification & Experimental Verification (`user_steps`):**
+  - Discuss with mentor whether omitting `user_steps += 1` in `creates` is intentional design (inserts naturally advance the log tip without amortized compaction debt) or an oversight.
+  - Benchmark an experimental variant with `user_steps += 1` in `creates` to measure insert latency when compaction is charged equally.
+- [ ] **Stacked Latency Breakdown Visualizations:**
+  - Generate stacked bar charts decomposing total `merkleize` time into the 4 constituent stages for all write types.
+
+---
+
 ### Priority 1: Disentangling Indexer Overhead (PROP-01 & B-Tree Control)
 - [x] **Define Ordered-Index Unordered Type Alias (`BTreeDb`):**
   - In `storage/src/qmdb/current/unordered/fixed.rs` and `storage/src/qmdb/benches/common.rs`, defined `BTreeDb` and `CurUFixBTreeDb<F>`.
@@ -34,35 +90,28 @@ A consolidated roadmap of pending tasks, architectural implementations, and scie
   - Added variant selector: `current::unordered_btree::fixed::mmb chunk=32` (and MMR).
 - [ ] **Build 3-Way Runner Script:**
   - Create `measurements-rain/experiments/indexer-control/run.sh`.
-  - Execute write-type sweep (10K writes, 10M keys) comparing Config A, B, and C across 3 repeats.
+  - Execute the indexer-control sweep at the current 4M-key, 2K-write anchor across 3 repeats.
 - [ ] **Extend JSON Comparison Schema:**
   - Output explicit fields for $\Delta_{\text{structure}}$ and $\Delta_{\text{protocol}}$.
 
 ---
 
 ### Priority 2: Persistent Initial Key Set & Pre-Seeded DB Snapshot Reuse
-> [!TIP]
-> **Motivation & Speedup:** Seeding 10,000,000 keys currently takes minutes per run, generating identical keys sequentially via `Sha256(i)`. Because `batch.merkleize()` is speculative in memory, the on-disk seeded database remains completely intact and pristine. Saving both the raw initial key set file and the pre-seeded DB directory eliminates repetitive setup overhead and guarantees byte-level determinism.
 
-- [ ] **Pre-Generated Binary Key Set (`keys_10M.bin`):**
-  - Store a contiguous binary file of pre-computed 32-byte SHA-256 keys ($32 \times 10{,}000{,}000 = 320\text{ MB}$).
-  - Verify size and integrity: exactly $320{,}000{,}000$ bytes, $10{,}000{,}000$ unique 32-byte digests.
-  - Implement zero-copy `mmap` or fast sequential read in `common.rs` to load the entire 10M keyspace in $< 50\text{ ms}$ instead of running 10M hashing cycles.
-- [ ] **Pre-Seeded Database Directory Reuse:**
-  - Configure `commonware_runtime::tokio::Config` with a deterministic path via `.with_storage_directory(dir)` (e.g. `storage-seeds/10M_mmb_<variant>`).
-  - In `MerkleizeWorkload::setup()`:
-    - Check if the database partition files already exist on disk.
-    - If present: Skip `seed_db(db, 10M)` entirely and simply open the database (takes $< 1\text{ second}$).
-    - If absent: Run `seed_db()` once and leave files intact.
-  - In `MerkleizeWorkload::teardown()`:
-    - Bypass `db.destroy()` so the pre-seeded database is preserved for subsequent benchmark iterations and process repeats.
+- [x] Canonical keysets with whole-file checksum sidecars and process-local caching.
+- [x] Shared Merkleization configuration and schema-2 validated saved databases.
+- [x] Immutable masters, isolated scratch copies, and verified reopen before timing.
+- [x] Required/auto/off policies and setup provenance archival.
+- Snapshot support is limited to `any_unordered_btree` and `current_ordered`.
+- Full-scale keysets/databases are prepared explicitly; implementation tests use small datasets.
+- See [snapshot reuse](snapshot-reuse.md) for commands and validation coverage.
 
 ---
 
 ### Priority 3: Deletion Workloads & Activity Invalidation (Former Task 6)
-- [ ] **Implement `WriteType::Delete` Support:**
-  - Add `Delete` to `WriteType` enum in `storage/src/qmdb/benches/common.rs`.
-  - Wire up `batch.write(k, None)` staging in `prepare_sampled_writes` / `stage_prepared_writes`.
+- [x] **Implement `WriteType::Delete` Support:**
+  - `Delete` is wired through prepared writes, Criterion selection, the pairwise
+    write-type runner, comparison output, and regression tests.
 - [ ] **Measure Pure Bitmap Invalidation Costs:**
   - Benchmark the cost of flipping bitmap bits from `1` to `0` without appending new active entries.
   - Observe dirty chunk re-hashing behavior under uniform vs. Zipfian skewed deletions.
@@ -86,41 +135,48 @@ A consolidated roadmap of pending tasks, architectural implementations, and scie
     - `CPU_CYCLES` and `INSTRUCTIONS` (to calculate Instructions Per Cycle - IPC).
     - `CACHE_MISSES` (L1-dcache and LLC misses to prove B-Tree memory stalls).
     - `BRANCH_MISSES` (branch misprediction rates in binary search loops).
-- [ ] **Process Resource Telemetry (`rusage` / `sysinfo`):**
-  - Instrument macro-benchmarks (10M key seeding and batch commits) with:
-    - User CPU Time vs System/Kernel CPU Time.
-    - Peak Resident Set Size (RSS memory in MB).
-    - Disk I/O bytes read/written per second.
+- [x] **Native CPU accounting (`libc`):**
+  - Shared `commonware-bench::cpu` start/finish API records user/kernel CPU time,
+    context switches and page faults across all process threads.
+  - `qmdb_cpu` measures one independent merkleize/apply batch per sample;
+    `run-cpu-telemetry.sh` captures raw samples, summaries, overhead and provenance.
+  - Native accounting remains separate from Criterion and Callgrind regression gates.
+- [x] **Process CPU monitoring (`sysinfo`):**
+  - Runtime samples CPU alongside memory every 10 seconds; utilization is exported
+    in basis points (10,000 = one core), after priming.
+  - CPU monitoring is configurable and disabled in native CPU benchmark runs.
+- [ ] **Additional resource studies:**
+  - Per-run peak RSS with correctly normalized platform units and isolated processes.
+  - Disk I/O bytes read/written per second.
+  - Linux execution validation and actual hardware counters.
 
 ---
 
-### Priority 5: Zero-Proof Unauthenticated Baseline (PROP-02, Former Task 4)
-- [ ] **Integrate `qmdb::store::Db`:**
-  - Wire up Commonware's raw key-value store [`qmdb::store::Db`](file:///Users/rains/rainworkspace/UWMadison/cs698/commonware-monorepo/storage/src/qmdb/store/db.rs) into the benchmark suite.
-- [ ] **Implement Unmerkleized Speculative Harness:**
-  - Benchmark batch staging and index lookup with zero SHA-256 leaf hashing and zero Merkle tree math.
-- [ ] **Calculate Absolute Cryptographic Tax:**
-  - $T_{\text{log}} = \text{Latency}(\text{any}) - \text{Latency}(\text{store})$.
-  - $T_{\text{total}} = \text{Latency}(\text{current\_ordered}) - \text{Latency}(\text{store})$.
+### Priority 5: Overhaul `apply_batch.rs` & Phase 3 Batch Application (IMP-08 / PROP-04)
 
----
+> [!IMPORTANT]
+> **Bridging Speculative Crypto (`merkleize`) to Real Storage Persistence (`apply_study`)**
+>
+> While upstream `storage/src/qmdb/benches/apply_batch.rs` remains untouched upstream code (65K keys toy scale), we implemented a dedicated Phase 3 benchmark harness—[`apply_study.rs`](../storage/src/qmdb/benches/apply_study.rs) (IMP-08)—that brings full scientific control parity, pre-seeded snapshot scratch isolation, and workload dimension controls to batch application.
 
-### Secondary Active: End-to-End Durable Write Lifecycle (PROP-04, Former Task 3)
-- [ ] **Overhaul `apply_batch.rs`:**
-  - Modernize `storage/src/qmdb/benches/apply_batch.rs` to support:
-    - `current::unordered` and `current::ordered`.
-    - `WriteSampler` (Zipfian skew and uniform access).
-    - `WriteType` (Overwrites vs Inserts).
-    - `prepare_sampled_writes` / `stage_prepared_writes` (timer boundary isolation).
-- [ ] **Benchmark the 3 Durability Tiers:**
-  - **Tier 1 (Speculative):** `merkleize()` only (in-memory).
-  - **Tier 2 (Buffered Append):** `apply_batch()` (OS page cache append).
-  - **Tier 3 (Durable Sync):** `apply_batch()` + `commit()` + `sync()` (`fsync` flash barrier).
-- [ ] **Instrument Write Amplification Factor (WAF):**
-  - Record exact physical bytes appended to disk per 10K writes.
-  - Validate the 2:1 write amplification hypothesis for `current::ordered` inserts (new entry $E_K$ + predecessor update $E'_p$).
-- [ ] **Create Runner:**
-  - Create `measurements-rain/experiments/durable/run.sh`.
+- [x] **Phase 3 Batch Application Harness (`apply_study.rs` / IMP-08):**
+  - **Standardized B-Tree Pair:** Compares `any::unordered_btree::fixed::mmb` vs. `current::ordered::fixed::mmb chunk=32`.
+  - **Scale Scaling:** Dynamically configured via `QMDB_MERKLEIZE_KEYS` (defaulting to the $4\text{M}$ keys anchor) and `QMDB_MERKLEIZE_UPDATES`.
+  - **Decoupled Setup via Snapshots:** Pre-seeded master databases cloned into per-iteration scratch directories. Master checksums verified, and setup/teardown strictly excluded from timing.
+  - **Workload Controls:** Full support for `overwrite`, `insert`, `delete`, and `mixed` write types alongside Zipfian skew ($s \in [0.0, 2.0]$).
+  - **Matrix Automation:** Seamlessly toggled across all existing experiment runners (`writesize`, `write-type`, `skew`, `db-scale`) via `export QMDB_STUDY_OPERATION=apply`.
+  - **Verification:** Covered by deterministic tests (`qmdb_apply_study.rs`) and Python fixtures (`test-apply-study.py`).
+- [ ] **Optional Reference: `qmdb::store::Db` Hardware Limit (Zero Cryptography):**
+  - Wire up Commonware's raw key-value store [`qmdb::store::Db`](file:///Users/rains/rainworkspace/UWMadison/cs698/commonware-monorepo/storage/src/qmdb/store/db.rs) strictly as an academic reference point.
+  - Time `store::Db::apply_batch` with raw `Changeset<K, V>` to isolate the absolute hardware ceiling when all Merkle integrity is absent.
+- [ ] **Phase 4: Durable Sync Tier & Write Amplification Factor (WAF):**
+  - Benchmark the 3 Durability Tiers:
+    - **Tier 1 (Speculative):** `merkleize()` only (in-memory math).
+    - **Tier 2 (Buffered Append):** `apply_batch()` (log buffer append + index update — measured by `apply_study`).
+    - **Tier 3 (Durable Sync):** `apply_batch()` + `commit()` + `sync()` (`fsync` flash barrier).
+  - Instrument physical bytes written to log files to validate the 2:1 write amplification hypothesis for `current::ordered` inserts (new entry $E_K$ + predecessor update $E'_p$).
+- [ ] **Dedicated Durable Experiment Runner:**
+  - Create `measurements-rain/experiments/durable/run.sh` to run durable sync persistence benchmarks across `store`, `any_unordered`, and `current_ordered`.
 
 ---
 

@@ -37,7 +37,7 @@ def group_cases_pairwise($rows; $kind):
          (map(.configuration) | sort) == ["any_unordered_btree", "current_ordered"]
       then . else error("expected Any unordered and Current ordered configurations") end
     | map({key: .configuration, value: .}) | from_entries;
-if length == (if $experiment == "write-type" then 6 else 3 end) then .
+if length == (if $experiment == "write-type" then 6 else ($order | split(",") | length) end) then .
 else error("unexpected Criterion result count") end
 | if all(.[];
     (.keyspace_keys | tonumber) == $keys and .write_calls_per_batch == $updates and
@@ -47,7 +47,20 @@ else error("unexpected Criterion result count") end
     .write_skew_exponent == $skew and .mean_us > 0 and .sample_count > 0)
   then . else error("experiment workload settings do not match") end
 | . as $rows
-| {schema_version: 2, experiment: $experiment, repeat: $repeat,
+| (map(.operation // "merkleize") | unique) as $operations
+| if ($operations | length) == 1 and ($operations[0] == "merkleize" or $operations[0] == "apply_study")
+  then . else error("cannot mix operations or compare unsupported phases") end
+| $operations[0] as $operation
+| if $operation == "apply_study" and (($order | split(",") | sort) != ["any_unordered_btree", "current_ordered"])
+  then error("apply study requires Any unordered B-Tree and Current ordered") else . end
+| (if $operation == "apply_study" then "apply_batch" else "batch_creation_staging_merkleization_root" end) as $scope
+| (if $operation == "apply_study" then "buffered" else "speculative" end) as $durability
+| if all(.[]; (.timing_scope // $scope) == $scope and (.durability // $durability) == $durability and
+     (if $operation == "apply_study" then .iteration_policy == "independent_snapshot_fixed_inputs" else true end))
+  then . else error("mismatched timing boundary, durability, or iteration policy") end
+| if ($order | split(",") | sort) == (map(config_id) | unique | sort)
+  then . else error("configuration order does not match measured engines") end
+| {schema_version: 2, operation: $operation, timing_scope: $scope, durability: $durability, experiment: $experiment, repeat: $repeat,
    keyspace_keys: $keys, write_calls_per_batch: $updates,
    write_skew_exponent: $skew, configuration_order: ($order | split(","))}
   + (if $experiment == "write-type" then
@@ -80,5 +93,6 @@ else error("unexpected Criterion result count") end
                 }) | from_entries),
                comparisons: {overwrite: differences($overwrites), insert: differences($inserts)}}
         end
-     else group_cases($rows; "overwrite") as $cases
-        | {configurations: $cases, comparisons: differences($cases)} end)
+     else (if ($order | split(",") | length) == 2 then group_cases_pairwise($rows; "overwrite")
+           else group_cases($rows; "overwrite") end) as $cases
+        | {configurations: $cases, comparisons: (if ($cases | length) == 2 then pairwise_differences($cases) else differences($cases) end)} end)
