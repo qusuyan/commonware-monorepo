@@ -7,7 +7,7 @@ below is retained as proposal history; fixed millisecond/zero-copy claims are no
 performance guarantees.
 
 - **Proposal ID:** PROP-05
-- **Status:** Proposed / Design Specification
+- **Status:** Implemented / Ready for Review
 - **Author:** Rain Sun
 - **Target Comparison Focus:**
   - **Variant A (Controlled Baseline):** `any::unordered_btree::fixed::mmb` (Historical append log with Merkle proofs, backed by B-Tree indexer)
@@ -15,7 +15,7 @@ performance guarantees.
   *(Note: Rigorous 2-way comparison standardizing both engines on B-Tree indexing to eliminate indexer data structure as a confounding variable).*
 - **Aligned Database Sizing Strategy:**
   - **Anchor Baseline ($K = 4\text{M}$ keys):** Used for all workload sweeps (write size, write type, access skew).
-  - **Database Scaling Sweep ($K \in \{1\text{M}, 2\text{M}, 4\text{M}, 10\text{M}\}$ keys):** Dedicated scaling study at fixed $u = 10\text{K}$.
+  - **Database Scaling Sweep ($K \in \{1\text{M}, 2\text{M}, 4\text{M}, 10\text{M}\}$ keys):** Dedicated scaling study at fixed $u = 2\text{K}$.
 - **Target Components:**
   - [`storage/src/qmdb/benches/common.rs`](file:///Users/rains/rainworkspace/UWMadison/cs698/commonware-monorepo/storage/src/qmdb/benches/common.rs)
   - [`storage/src/qmdb/benches/merkleize.rs`](file:///Users/rains/rainworkspace/UWMadison/cs698/commonware-monorepo/storage/src/qmdb/benches/merkleize.rs)
@@ -31,12 +31,12 @@ performance guarantees.
 ## 1. Problem Statement & Motivation
 
 Our study uses an **Anchor & Pivot (OFAT)** controlled experimental design comparing **`any_unordered (btree)` vs. `current_ordered`**:
-- **Control Anchor:** Fixed at $K = 4\text{M}$ keys, $u = 10\text{K}$ writes, `overwrite`, and uniform access ($s = 0$).
+- **Control Anchor:** Fixed at $K = 4\text{M}$ keys, $u = 2\text{K}$ writes, `overwrite`, and uniform access ($s = 0$).
 - **The 4 Pivots:**
-  1. *Write Size Sweep:* $u \in \{200, 500, 1\text{K}, 2\text{K}, 5\text{K}, 10\text{K}\}$ at fixed $K = 4\text{M}$.
-  2. *Write Type Sweep:* `overwrite` vs `insert` at fixed $K = 4\text{M}, u = 10\text{K}$.
-  3. *Access Skew Sweep:* Zipf $s \in \{0, 0.5, 1, 1.5, 2\}$ at fixed $K = 4\text{M}, u = 10\text{K}$.
-  4. *Database Scale Sweep:* $K \in \{1\text{M}, 2\text{M}, 4\text{M}, 10\text{M}\}$ at fixed $u = 10\text{K}$.
+  1. *Write Size Sweep:* $u \in \{200, 500, 1\text{K}, 1.5\text{K}, 2\text{K}, 5\text{K}, 7\text{K}, 8\text{K}, 10\text{K}\}$ at fixed $K = 4\text{M}$.
+  2. *Write Type Sweep:* separate `overwrite`, `insert`, and `delete` cases at fixed $K = 4\text{M}, u = 2\text{K}$.
+  3. *Access Skew Sweep:* Zipf $s \in \{0, 0.5, 1, 1.5, 2\}$ at fixed $K = 4\text{M}, u = 2\text{K}$.
+  4. *Database Scale Sweep:* $K \in \{1\text{M}, 2\text{M}, 4\text{M}, 10\text{M}\}$ at fixed $u = 2\text{K}$.
 
 ### The Redundant Seeding Bottleneck
 Even with 4M keys, seeding each benchmark from scratch:

@@ -37,6 +37,13 @@ class SnapshotCLI(unittest.TestCase):
                     result = run(*command)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertEqual(files(db), before)
+                exercised = run('exercise-db', '--db-path', db, '--updates', 17)
+                self.assertEqual(exercised.returncode, 0, exercised.stderr)
+                roots = json.loads(exercised.stdout)
+                self.assertEqual(len(roots['batches']), 4)
+                repeated = run('exercise-db', '--db-path', db, '--updates', 17)
+                self.assertEqual(json.loads(repeated.stdout), roots)
+                self.assertEqual(files(db), before)
 
     def test_invalid_commands_preserve_existing_output(self):
         with tempfile.TemporaryDirectory() as tmp:

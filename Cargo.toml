@@ -71,6 +71,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(full_bench)', 'cfg(huge_be
 unused-must-use = "deny"
 rust-2018-idioms = "deny"
 warnings = "deny"
+deprecated = "allow"
 
 [workspace.lints.clippy]
 missing-const-for-fn = "warn"

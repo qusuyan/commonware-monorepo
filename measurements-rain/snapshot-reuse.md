@@ -3,10 +3,9 @@
 Snapshot reuse supports `any_unordered_btree` and `current_ordered`, fixed 32-byte
 keys/values, MMB, and 32-byte Current chunks. It applies only to synced-seed
 Merkleization cases (`s=true`). Other variants and unsynced cases retain fresh
-setup. The write-type runner compares standard `any_unordered` with
-`current_ordered`: Any reuses saved keys but builds its database fresh; Current
-requires a saved database by default. The additional `any_unordered_btree`
-snapshot support does not change that selected comparison.
+setup. The active write-size, write-type, skew, and database-scale runners use
+the supported pair, so both variants require compatible saved databases by
+default.
 
 ## Prepare once
 
@@ -21,6 +20,22 @@ measurements-rain/scripts/seed-db.sh --variant current_ordered --count 4000000
 
 The key file lives at `measurements-rain/data/keys_10M.bin`, with a `.bin.json`
 sidecar. Masters live under `measurements-rain/storage-seeds/k<count>_<variant>/`.
+Separate files can also be kept for each study size:
+
+```bash
+measurements-rain/scripts/generate-keys.sh --count 1000000 --out measurements-rain/data/keys_1M.bin
+measurements-rain/scripts/generate-keys.sh --count 2000000 --out measurements-rain/data/keys_2M.bin
+measurements-rain/scripts/generate-keys.sh --count 4000000 --out measurements-rain/data/keys_4M.bin
+measurements-rain/scripts/seed-db.sh --variant current_ordered --count 4000000 --keys-file measurements-rain/data/keys_4M.bin
+```
+
+Each file has its own `.bin.json` sidecar recording its count, algorithm, and
+checksum. Smaller files contain the identical prefix of `keys_10M.bin`, so they
+are compatible with masters created from that prefix. Preparation can select
+them explicitly with `--keys-file`; benchmark key loading still uses the default
+`keys_10M.bin` and takes the requested prefix. It does not automatically select
+these size-specific files.
+
 Repeated preparation validates and reuses compatible artifacts. It never replaces
 an incompatible destination. Choose a new output path or explicitly remove an old
 artifact yourself. A custom `--out` is useful for inspection/tests; automatic
@@ -38,17 +53,17 @@ insufficient files fail with an error. Do not edit key files or their sidecars.
 Use the existing runner with an exact variant filter, for example:
 
 ```bash
-measurements-rain/scripts/run-criterion.sh pair-any-u10000 qmdb \
-  --keys 4000000 --updates 10000 -- \
-  --exact 'qmdb::merkleize/v=any::unordered_btree::fixed::mmb k=4000000 u=10000 ch=false s=true cc=false'
-measurements-rain/scripts/run-criterion.sh pair-current-u10000 qmdb \
-  --keys 4000000 --updates 10000 -- \
-  --exact 'qmdb::merkleize/v=current::ordered::fixed::mmb chunk=32 k=4000000 u=10000 ch=false s=true cc=false'
+measurements-rain/scripts/run-criterion.sh pair-any-u2000 qmdb \
+  --keys 4000000 --updates 2000 -- \
+  --exact 'qmdb::merkleize/v=any::unordered_btree::fixed::mmb k=4000000 u=2000 ch=false s=true cc=false'
+measurements-rain/scripts/run-criterion.sh pair-current-u2000 qmdb \
+  --keys 4000000 --updates 2000 -- \
+  --exact 'qmdb::merkleize/v=current::ordered::fixed::mmb chunk=32 k=4000000 u=2000 ch=false s=true cc=false'
 ```
 
-Snapshot reuse does not select benchmark variants. For the write-size/skew
-runners and the pairwise write-type runner, first prepare `current_ordered` at
-the requested key count. Standard unordered variants still seed fresh.
+Snapshot reuse does not select benchmark variants. For every active runner,
+prepare both `any_unordered_btree` and `current_ordered` at each requested key
+count. Standard unordered variants in historical or ad hoc commands still seed fresh.
 
 Batch size, overwrite/insert/delete/mixed selection, and Zipf exponent do not change the
 initial master. The 4M masters can be shared across workload sweeps and process

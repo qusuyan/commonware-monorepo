@@ -11,6 +11,7 @@ use common::{
     snapshots::{self, ReuseMode, Variant},
 };
 use commonware_bench::Workload;
+use commonware_cryptography::Sha256;
 use commonware_runtime::{Runner as _, Supervisor as _, buffer::paged::CacheRef, tokio};
 use commonware_storage::{
     merkle::mmb,
@@ -63,7 +64,8 @@ where
         clear_cache: false,
         snapshot_dir: Some("scratch".into()),
     };
-    let mut workload = merkleize::MerkleizeWorkload::new(ctx, db, pc, options, new_child);
+    let mut workload =
+        merkleize::MerkleizeWorkload::<mmb::Family, C>::new(ctx, db, pc, options, new_child);
     workload.setup().await;
     let mut roots = batch_roots;
     for _ in 0..3 {
@@ -84,13 +86,13 @@ fn benchmark_roots(path: &Path, variant: Variant, manifest: &snapshots::Manifest
                 )
                 .await
                 .unwrap();
-                exercise(
+                exercise::<AnyUFixBTreeDb<mmb::Family>>(
                     ctx,
                     db,
                     pc,
                     merkleize::Variant::AnyUnorderedBTreeFixedMmb,
                     manifest,
-                    |parent| parent.new_batch(),
+                    |parent| parent.new_batch::<Sha256>(),
                 )
                 .await
             }
@@ -101,13 +103,13 @@ fn benchmark_roots(path: &Path, variant: Variant, manifest: &snapshots::Manifest
                 )
                 .await
                 .unwrap();
-                exercise(
+                exercise::<CurOFixDb<mmb::Family>>(
                     ctx,
                     db,
                     pc,
                     merkleize::Variant::CurrentOrderedFixed32Mmb,
                     manifest,
-                    |parent| parent.new_batch(),
+                    |parent| parent.new_batch::<Sha256>(),
                 )
                 .await
             }

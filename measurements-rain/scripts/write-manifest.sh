@@ -35,10 +35,10 @@ fixed_updates="null"
 write_type="null"
 skew="null"
 selection="null"
-if [ "$kind" = "criterion" ] && [ -n "${QMDB_MERKLEIZE_UPDATES:-}" ]; then
+if { [ "$kind" = "criterion" ] || [ "$kind" = "cpu" ]; } && [ -n "${QMDB_MERKLEIZE_UPDATES:-}" ]; then
     fixed_updates="$QMDB_MERKLEIZE_UPDATES"
 fi
-if [ "$kind" = "criterion" ]; then
+if [ "$kind" = "criterion" ] || [ "$kind" = "cpu" ]; then
     write_type="\"$(json_escape "${QMDB_MERKLEIZE_WRITE_TYPE:-overwrite}")\""
     skew="$("$root/scripts/validate-skew.sh" "${QMDB_MERKLEIZE_SKEW:-0}")"
     if [ "$skew" = 0 ]; then selection='"uniform"'; else selection='"zipf"'; fi
@@ -53,6 +53,7 @@ cat > "$run_dir/manifest.json" <<EOF
   "write_skew_exponent": $skew,
   "write_selection": $selection,
   "merkleize_input_generation_timed": false,
+  "study_operation": "$(json_escape "${QMDB_STUDY_OPERATION:-merkleize}")",
   "snapshot_reuse_policy": "$(json_escape "${QMDB_SNAPSHOT_REUSE:-required}")",
   "timestamp_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "git_revision": "$(git rev-parse HEAD)",
