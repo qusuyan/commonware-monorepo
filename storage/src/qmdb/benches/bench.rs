@@ -3,6 +3,7 @@
 use criterion::criterion_main;
 
 mod apply_batch;
+mod apply_study;
 mod chained_growth;
 mod common;
 mod generate;
@@ -13,6 +14,7 @@ criterion_main!(
     // Each module owns a distinct QMDB lifecycle phase. A Criterion name filter can
     // therefore select one phase without running the other benchmark families.
     apply_batch::benches,
+    apply_study::benches,
     chained_growth::benches,
     generate::benches,
     init::benches,

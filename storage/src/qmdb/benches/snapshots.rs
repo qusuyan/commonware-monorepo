@@ -422,6 +422,30 @@ impl Prepared {
 pub fn prepare(variant: Variant, count: u64, mode: ReuseMode) -> io::Result<Prepared> {
     prepare_at(variant, count, mode, &variant.default_path(count))
 }
+pub fn prepare_scratch(variant: Variant, count: u64, mode: ReuseMode) -> io::Result<Prepared> {
+    prepare_scratch_at(variant, count, mode, &variant.default_path(count))
+}
+pub fn prepare_scratch_at(
+    variant: Variant,
+    count: u64,
+    mode: ReuseMode,
+    master: &Path,
+) -> io::Result<Prepared> {
+    let descriptor = Descriptor::production();
+    if mode != ReuseMode::Off && master.try_exists()? {
+        let manifest = validate(master, variant, count, &descriptor)?;
+        let scratch = ScratchDir::new_from_clone(master, &std::env::temp_dir())?;
+        // Benchmark callers open and validate bounds immediately, so verify_open is redundant.
+        return Ok(Prepared {
+            scratch,
+            manifest,
+            source: "reused",
+            mode,
+            identity: Some(master.to_path_buf()),
+        });
+    }
+    prepare_at(variant, count, mode, master)
+}
 pub fn prepare_at(
     variant: Variant,
     count: u64,
