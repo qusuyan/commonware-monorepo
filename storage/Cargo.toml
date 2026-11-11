@@ -112,6 +112,17 @@ path = "src/qmdb/benches/bench.rs"
 required-features = ["test-traits"]
 
 [[bench]]
+name = "qmdb_components"
+harness = false
+path = "src/qmdb/benches/components.rs"
+
+[[bench]]
+name = "qmdb_cpu"
+harness = false
+path = "src/qmdb/benches/cpu.rs"
+required-features = ["test-traits"]
+
+[[bench]]
 name = "qmdb_gungraun"
 harness = false
 path = "src/qmdb/benches/bench_gungraun.rs"

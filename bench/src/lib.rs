@@ -4,6 +4,8 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 
+commonware_macros::stability_mod!(ALPHA, pub mod cpu);
+
 commonware_macros::stability_scope!(ALPHA {
     use std::{
         collections::BTreeMap,

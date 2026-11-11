@@ -25,6 +25,9 @@ serde_json.workspace = true
 shlex.workspace = true
 toml.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [[bin]]
 name = "benchmark-tracker"
 path = "src/bin/main.rs"

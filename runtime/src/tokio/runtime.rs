@@ -177,6 +177,9 @@ pub struct Config {
 
     /// Explicit buffer pool configuration for storage I/O, if provided.
     storage_buffer_pool_cfg: Option<BufferPoolConfig>,
+
+    /// Whether to periodically collect process CPU usage in addition to memory.
+    process_cpu_monitoring: bool,
 }
 
 impl Config {
@@ -195,10 +198,17 @@ impl Config {
             network_cfg: NetworkConfig::default(),
             network_buffer_pool_cfg: None,
             storage_buffer_pool_cfg: None,
+            process_cpu_monitoring: true,
         }
     }
 
     // Setters
+    /// Enable periodic process CPU monitoring. Defaults to true; memory monitoring is retained.
+    pub const fn with_process_cpu_monitoring(mut self, enabled: bool) -> Self {
+        self.process_cpu_monitoring = enabled;
+        self
+    }
+
     /// See [Config]
     pub const fn with_worker_threads(mut self, n: usize) -> Self {
         self.worker_threads = n;
@@ -394,7 +404,8 @@ impl crate::Runner for Runner {
         //
         // We prefer to collect process metrics outside of `Context` because
         // we are using `runtime_registry` rather than the one provided by `Context`.
-        let process = MeteredProcess::init(&mut runtime_registry);
+        let process = MeteredProcess::init(&mut runtime_registry)
+            .with_cpu_monitoring(self.cfg.process_cpu_monitoring);
         runtime.spawn(process.collect(tokio::time::sleep));
 
         // Initialize buffer pools
